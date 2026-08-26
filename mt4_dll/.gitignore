@@ -1,0 +1,4 @@
+/target/
+*.log
+lib_orig.txt
+*.bak_*

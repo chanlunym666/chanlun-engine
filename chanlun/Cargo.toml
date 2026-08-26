@@ -1,0 +1,12 @@
+[package]
+name = "chanlun_lean_lib"
+version = "0.1.0"
+edition = "2021"
+description = "缠论算法纯Rust库 — 零依赖, 零PyO3, 可嵌入任意Rust项目"
+
+[dependencies]
+log = "0.4"
+
+[features]
+default = []
+guidao = []

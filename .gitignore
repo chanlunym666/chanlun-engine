@@ -1,0 +1,19 @@
+# 构建产物
+target/
+
+# 本地发布包
+releases/
+
+# 开发期工具脚本（不参与开源分发）
+tools/
+
+# Python
+__pycache__/
+*.pyc
+
+# 依赖本机数据的诊断测试与孤儿数据（不入库）
+chanlun/tests/probe_f1_m5_events.rs
+chanlun/tests/probe_stroke_case3_race.rs
+chanlun/tests/verify_300842.rs
+chanlun/tests/verify_precise.rs
+chanlun/tests/300842_5m.bin

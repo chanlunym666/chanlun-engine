@@ -1,0 +1,14 @@
+[package]
+name = "slzs_chanlun_mt4"
+version = "0.1.0"
+edition = "2021"
+description = "缠论MT4 32位DLL插件 — MT4仅支持32位DLL，必须编译为i686-pc-windows-msvc"
+
+[dependencies]
+chanlun_lean_lib = { path = "../chanlun", features = ["guidao"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3

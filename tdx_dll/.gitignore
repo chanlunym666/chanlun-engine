@@ -1,0 +1,2 @@
+# cargo 构建产物 — 仅未跟踪文件生效; target/release 下的 DLL/exp/pdb 已跟踪(分发惯例)不受影响
+target/

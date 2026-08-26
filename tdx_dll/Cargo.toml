@@ -1,0 +1,14 @@
+[package]
+name = "slzs_chanlun"
+version = "0.1.0"
+edition = "2021"
+description = "缠论通达信64位DLL插件 — TDX仅支持64位DLL，默认x86_64-pc-windows-mscv"
+
+[dependencies]
+chanlun_lean_lib = { path = "../chanlun", features = ["guidao"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3

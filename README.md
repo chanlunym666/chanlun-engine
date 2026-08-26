@@ -1,0 +1,227 @@
+# 缠论指标引擎（Chanlun Engine）
+
+> **English:** Chanlun Engine is a Rust implementation of Chan Theory technical analysis. It builds a five-level recursive structure — fractals, strokes, segments, major segments and superior segments — with three independent channel sets, major-segment centers and structure markers, and ships as ready-to-use DLL plugins for Tongdaxin (TDX, 64-bit) and MetaTrader 4 (32-bit). All computation runs locally without network access. MIT licensed.
+
+**用 Rust 从零实现的缠论（Chan Theory）技术分析引擎**，提供**通达信（TDX）**与 **MT4** 双平台 DLL 插件，复制即用。五级递归结构 · 三级独立轨道 · 大段中枢 · 买卖点自动标注 · 全市场选股。
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.99.1-dea584?logo=rust)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)]()
+[![通达信](https://img.shields.io/badge/通达信-64位DLL-red)]()
+[![MT4](https://img.shields.io/badge/MT4-32位DLL-orange)]()
+
+![缠论结构总览](docs/images/structure-overview.png)
+
+## 效果展示
+
+**五级递归结构 + 三级轨道 + 大段中枢**：分型 → 笔 → 线段 → 大段 → 高级段逐级递归，轨道跟随价格移动、永不穿越K线。
+
+![全买卖点标注](docs/images/markers-full.png)
+
+**买卖点自动标注**：大段级与高级段级的二买/二卖、三买/三卖、2+N 买/卖、一买/一卖，全部由结构自动判定。
+
+![30分钟多头趋势](docs/images/trend-30m.png)
+
+## 项目简介
+
+缠论指标引擎是一套用 Rust 从零实现的缠论（Chan Theory）技术分析引擎，将缠论的**五级递归结构**完整落地为可运行的指标，并打包为通达信（TDX）与 MT4 双平台的 DLL 插件，复制即用。
+
+**核心能力：**
+
+- **五级递归结构**：分型 → 笔 → 线段 → 大段 → 高级段。每一级都由下一级构成（笔组成线段、线段组成大段、大段组成高级段），逐级递归、层层确认，把缠论的级别体系完整呈现。
+- **三级独立轨道**：笔、线段、大段各有一套独立的上/下轨道，分别刻画对应级别的走势运行区间，轨道跟随价格移动、永不穿越K线。
+- **大段中枢**：自动识别大段重叠区间，标注中枢上沿 ZG / 下沿 ZD / 起止位置，中枢是走势确认与买卖点判断的枢纽。
+- **买卖点标记**：大段级与高级段级买卖点直接在图上标注（二买/二卖/三买/三卖/2+N 买/卖/一买/一卖），全部由结构自动判定，不依赖任何外部数据。
+- **二三买选股公式**：在通达信中一键全市场扫描二买、三买信号。
+
+**设计原则：**
+
+- **纯本地计算**：所有算法在你的电脑上运行，不联网、不上传任何数据；
+- **双平台即装即用**：发布包含编译好的 64 位 TDX DLL 与 32 位 MT4 DLL，复制即用；
+- **全量开源**：算法库、FFI 层、公式、测试全部开放，MIT 协议。
+
+## 减少特殊线段
+
+通过大数据分析优化了算法，最大程度减少特殊线段，依然遵循并符合缠论底层原则。
+
+一笔该不该当一个线段？一笔在什么情况下当一个线段更合理？源码中有答案。
+
+## 为何到本级别才开始显示买卖点？
+
+这是缠论最基本的实操观察视角（同构递归本级别），各级结构在一个界面即可观察，不用来回切换周期。
+
+对新手特别友好，不用再纠结以 5 分、30 分或日线为操作级别，任何周期的买卖点都至少是同构递归起来的本级别买卖点，线段级都只是它的基础、是它的次级别。
+
+## 为什么开源
+
+学习缠论越深入，想法越多，却因为当时不懂代码，没法大量验证。
+
+不信邪，就自己搞呗。
+
+开源，是为了致敬缠师的思想格局。
+
+## 理论来源与作者
+
+- 缠论理论来源于《缠论108课》；
+- 三级轨道的理论来源为李晓军老师——三级轨道大有用处，不会的可以多看看李晓军老师的公开课；
+- 所有算法均为作者独立开发，前后历时一年。
+
+## 功能
+
+- **五级递归结构**：分型 → 笔 → 线段 → 大段 → 高级段
+- **三级独立轨道**：笔轨道、线段轨道、大段轨道（各一套上/下轨）
+- **大段中枢**：中枢上沿 ZG / 下沿 ZD / 起止位置标记（「反向大段重叠」口径，高级段内全部中枢）
+- **买卖点**：大段级（大二买/大二卖/大三买/大三卖/大2+N买/卖/大3+N买/卖/大一买/大一卖）与高级段级（高二买/高二卖/高2+N买/卖/高3+N买/卖/高三买/高3卖/高一买/高一卖）文字标记
+- **二三买选股公式**：通达信条件选股扩展，全市场 5220 只 × 30 分钟周期 × 5 天窗口 × 三级（笔、线段、大段），端到端约 13 秒（实测 12.52 秒）；同条件换 5 分钟周期（平均约 15000 根K线、一天窗口）端到端约 36 秒（测试平台 i7-9700F / 8核 / 16GB / 通达信64位）
+- **通达信手机端·缠论笔（纯公式版）**：只用手机通达信的朋友，仓库里给你备了一个主图叠加公式——导入即画上下笔（`tdx_dll\formulas\通达信手机端-缠论笔.txt`）。⚠️ 说明：这是近似实现（注释原话"通达信公式无法画标准的笔"），细节不如 Rust 完整版；下载后，网上搜索下"通达信移动端导入公式的流程"，导入若注释乱码，记事本另存为 ANSI/GBK 即可。
+
+## 快速开始
+
+下载发布包（GitHub Releases 页 `chanlun_engine_open_source.zip`），解压后按 **[傻瓜式使用说明书](傻瓜式使用说明书.md)** 操作，全程无需编译，复制即用。
+
+> 若部署遇到任何问题，请在 GitHub Issues 中反馈。
+
+## 目录结构
+
+```
+chanlun_kaiyuan/
+├── chanlun/          # 算法库 (chanlun_lean_lib, Rust crate)
+│   ├── src/          #   lib.rs 分型/笔/线段/大段/高级段 / guidao.rs 轨道与买卖点 / zhongshu.rs 中枢
+│   └── tests/        #   回归测试与数据验证
+├── tdx_dll/          # 通达信 64 位 DLL (slzs_chanlun.dll)
+│   ├── src/          #   FFI 层: 函数注册表 (mark 1-10/35/37/39-42)
+│   ├── formulas/     #   通达信主图公式 + 二三买选股公式 + 手机端缠论笔纯公式 (导入公式管理器即可)
+│   └── build_deploy.ps1
+├── mt4_dll/          # MT4 32 位 DLL (slzs_chanlun_mt4.dll)
+│   ├── src/          #   FFI 层: 12 个导出函数
+│   ├── mql4/         #   chanlun.mq4 指标源码
+│   └── build_deploy.ps1 / verify_all.ps1
+├── dist/             # 编译好的成品 DLL（即装即用）
+│   ├── tdx/          #   slzs_chanlun.dll（64 位）
+│   └── mt4/          #   slzs_chanlun_mt4.dll（32 位）
+├── 傻瓜式使用说明书.md
+└── LICENSE
+```
+
+## 构建要求
+
+- Rust 工具链（`rust-toolchain.toml` 已锁定版本）
+- 通达信 DLL：64 位，默认 `x86_64-pc-windows-msvc`
+- MT4 DLL：32 位，需要 `i686-pc-windows-msvc` target：
+
+```
+rustup target add i686-pc-windows-msvc
+```
+
+## 构建与测试
+
+```bash
+# 算法库测试
+cd chanlun && cargo test
+
+# 通达信 DLL
+cd tdx_dll && cargo build --release          # 64 位
+cd tdx_dll && cargo test
+
+# MT4 DLL
+cd mt4_dll && cargo build --release --target i686-pc-windows-msvc   # 32 位
+cd mt4_dll && cargo test
+```
+
+一键构建 + 部署到本机交易终端：
+
+```powershell
+powershell -File tdx_dll\build_deploy.ps1
+powershell -File mt4_dll\build_deploy.ps1
+```
+
+MT4 侧另提供 9 层全链路自动验证：
+
+```powershell
+powershell -File mt4_dll\verify_all.ps1
+```
+
+## 通达信安装
+
+> 💡 **一键部署（推荐）**：运行 `tdx_dll\build_deploy.ps1`（右键 → 使用 PowerShell 运行）即自动完成放 DLL + 绑定 DLL3；目录需要权限时自动弹一次 UAC 确认，无需手动管理员。手动部署见下方步骤（仅当通达信装在 `C:\Program Files` 等受保护目录、复制提示权限不足时，才需以管理员身份运行一次）。
+
+1. 将 `dist\tdx\slzs_chanlun.dll` 复制到通达信安装目录的 `T0002\dlls\` 下。
+2. 【绑定 DLL】一键部署已自动绑定（`dlls.ini` 的 `band3=slzs_chanlun.dll`），跳过本条；手动部署时必做：打开公式管理器（Ctrl+F），找到“DLL函数”区域，把 `slzs_chanlun.dll` 指定为 **第 3 号 DLL（DLL3）**。公式调用的是 `TDXDLL3()`，只有绑到 3 号槽才能调用到本 DLL；若你的 dlls 目录里还有别的 DLL，务必手动把本 DLL 绑到 3 号槽，否则 TDXDLL3 会调用到别的 DLL，导致图表空白 / 选股全无。
+3. 打开公式管理器（Ctrl+F），新建主图公式，将 `tdx_dll\formulas\缠论主图公式.txt` 内容粘贴保存。
+4. 在主图加载该公式即可看到笔/线段/大段/高级段/轨道/中枢/买卖点。
+5. （可选）条件选股：Ctrl+F 新建「条件选股公式」，粘贴 `tdx_dll\formulas\缠论二三买选股公式.txt` 内容保存；「功能 → 选股器 → 条件选股」选择该公式即可全市场扫描二买/三买。
+
+## MT4 安装
+
+1. 将 `dist\mt4\slzs_chanlun_mt4.dll` 复制到 MT4 数据目录 `MQL4\Libraries\`。
+2. 将 `mt4_dll\mql4\chanlun.mq4` 复制到 `MQL4\Indicators\` 并在 MT4 中编译（或直接使用 `build_deploy.ps1` 自动编译部署）。
+3. 在图表上加载 `chanlun` 指标。
+
+> 注意：MT4 只支持 32 位 DLL；部署 DLL 前请先关闭 MT4 终端。
+> 由于买卖点由多级递归结构同构推出，建议加载 **2500–5000 根**历史K线以保证完整计算。
+
+## 导出接口
+
+### 通达信（TDXDLL3）
+
+| mark | 含义 | 参数 |
+|------|------|------|
+| 1 | 分型 | 1=方向 |
+| 2 | 笔 | 1=方向, 2=价格 |
+| 3 | 线段 | 1=方向, 2=价格 |
+| 4 | 大段 | 1=方向, 2=价格 |
+| 5/6 | 笔轨道上/下 | - |
+| 7/8 | 线段轨道上/下 | - |
+| 9/10 | 大段轨道上/下 | - |
+| 35 | 高级段 | 1=方向, 2=价格 |
+| 37 | 大段买卖点 | 1=大二买, 2=大二卖, 3=大三买, 4=大三卖; 5..8=大2+1~4买, 9..12=大2+1~4卖; 13=大一买, 14=大一卖 |
+| 43/44/45 | 高级段买卖点 | 43: 1=高二买, 2=高二卖, 13=高一买, 14=高一卖; 44: 3..6=高2+1~4买, 7..10=高2+1~4卖; 45: 11=高三买, 12=高3卖 |
+| 39/40/41/42 | 大段中枢 ZG/ZD/起/止 | - |
+
+### MT4
+
+| 导出函数 | 含义 |
+|----------|------|
+| chanlun_init | 初始化管线 |
+| chanlun_get_strokes / get_segments / get_bigsegments | 笔 / 线段 / 大段 |
+| chanlun_get_stroke_bands / get_segment_bands / get_bigseg_bands | 三级轨道（笔/线段/大段，各一套上下轨） |
+| chanlun_get_superior_segments | 高级段 |
+| chanlun_markers_compute / markers_get | 二买二卖三买三卖 |
+| chanlun_zhongshus_compute / zhongshus_get | 大段中枢 |
+
+## 自定义
+
+- **Case3/Case4（全参数可调）**：DLL/公式默认 笔=0 层=0（全部规则启用）。想关闭部分规则的朋友，通达信在公式里改 笔/层 变量（0全开/3关case3/4关case4/5关case34），MT4 在指标参数窗口改 ChanlunStrokeCases/ChanlunLevelCases。
+- **中枢数量**：「反向大段重叠」口径，高级段内的全部中枢都会画出。
+
+## 常见问题
+
+**Q：作者学缠论多久了？**
+
+10 年整。
+
+## 测试
+
+```powershell
+cd chanlun;  cargo test --features guidao
+cd tdx_dll;  cargo test
+cd mt4_dll;  cargo test
+```
+
+| 模块 | 测试数 | 覆盖内容 |
+|------|--------|----------|
+| `chanlun/tests` | 12 | 结构输出对照回归 |
+| `tdx_dll/src` | 17 | FFI 层与函数表 |
+| `mt4_dll/src` + `tests` | 11 | FFI 层与跨层一致性 |
+
+MT4 侧另有一键全链路验证脚本 `mt4_dll\verify_all.ps1`。
+
+## 免责声明
+
+本项目为非官方第三方插件，与深圳市财富趋势科技股份有限公司（通达信）、MetaQuotes Ltd（MetaTrader 4）均无隶属、授权或背书关系。文中「通达信」「TDX」「MT4」「MetaTrader 4」等名称仅用于说明兼容的宿主软件。
+
+本项目的结构标注与选股公式仅供技术学习与图表可视化研究，不构成任何投资建议，不保证任何收益或结果。据此进行交易决策的风险由使用者自行承担。
+
+## License
+
+MIT © 2026 缠论密码-M321
