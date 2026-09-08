@@ -26,17 +26,17 @@ type PlugInFunc = unsafe extern "C" fn(c_int, *mut c_float, *mut c_float, *mut c
 // ── Pipeline 缓存 ──
 use std::sync::Mutex;
 use std::sync::Arc;
-// Arc 共享 (2026-08-20 对齐 flowsurface P3/MT4: 命中/存缓存均免 from_parts 9 Vec 克隆; 全局 Mutex 跨线程故用 Arc 非 Rc)
-// 2026-09-05 参数化: 缓存键含 (笔, 层) case 参数; case 状态存线程局部 TL_CASES —
-//   TDX GUI 各图表重算同线程且公式设置行先于数据行执行; 其他线程不调 46/49 → 恒全开.
+// Arc 共享: 命中/存缓存均免 from_parts 9 Vec 克隆; 全局 Mutex 跨线程故用 Arc 非 Rc
+// 参数化: 缓存键含 (笔, 层) case 参数; case 状态存线程局部 TL_CASES —
+//   TDX 图表重算同线程且公式设置行先于数据行执行; 其他线程不调 46/49 → 恒全开.
 static PIPELINE_CACHE: Mutex<Option<((Vec<f64>, Vec<f64>, u8, u8), Arc<ChanlunPipeline>)>> = Mutex::new(None);
 
 thread_local! {
-    /// 用户 case 参数 (0/3/4/5, 默认 0=全开): (笔, 线段~高级段)
+    /// case 参数 (0/3/4/5, 默认 0=全开): (笔, 线段~高级段)
     static TL_CASES: std::cell::RefCell<(u8, u8)> = const { std::cell::RefCell::new((0u8, 0u8)) };
 }
 
-/// 计算/命中管线 — 返回 Arc 共享引用 (对齐 flowsurface P3/MT4, 免 from_parts 9 Vec 克隆)
+/// 计算/命中管线 — 返回 Arc 共享引用 (免 from_parts 9 Vec 克隆)
 fn get_pipeline(highs: Vec<f64>, lows: Vec<f64>) -> Arc<ChanlunPipeline> {
     let (sc, lc) = TL_CASES.with(|c| *c.borrow());
     let mut cache = PIPELINE_CACHE.lock().unwrap();
@@ -57,7 +57,7 @@ fn get_pipeline(highs: Vec<f64>, lows: Vec<f64>) -> Arc<ChanlunPipeline> {
     rc
 }
 
-// ── 缠论 case 参数设置 (2026-09-05; 默认 0=全开=历史行为零回归) ──
+// ── 缠论 case 参数设置 (默认 0=全开=历史行为零回归) ──
 // mark 46 = 笔参数, mark 49 = 线段~高级段参数 (两函数分开注册以区分槽位)
 // mode 值: 0全开 / 3关case3 / 4关case4 / 5关case34; 参数不变不动作, 变化才清管线缓存
 unsafe fn apply_case_param(slot: usize, m: u8) {
@@ -144,7 +144,6 @@ unsafe extern "C" fn fractals_fn(
 }
 
 // ── 笔 (Strokes) ──
-// 对齐 Flowsurface chart/kline.rs L922-947 与 build_strokes L222-233:
 //   上升笔: start=底分型(-1) → end=顶分型(+1)
 //   下降笔: start=顶分型(+1) → end=底分型(-1)
 //   线型: 实线(Solid), 颜色: #006400 DarkGreen, 宽度2
@@ -182,7 +181,7 @@ unsafe extern "C" fn strokes_fn(
 }
 
 // ── 线段 (Segments) ──
-// 对齐 Flowsurface chart/kline.rs L897-920, 色#BA55D3, 宽3px
+// 线段样式: 色#BA55D3, 宽3px
 // segment = (start_stroke_idx, end_stroke_idx, is_up)
 // 方向: ±100 区分于笔
 unsafe extern "C" fn segments_fn(
@@ -219,7 +218,7 @@ unsafe extern "C" fn segments_fn(
 }
 
 // ── 大段 (Big Segments) ──
-// 对齐 Flowsurface chart/kline.rs L860-894, 色#00BFFF, 宽4px
+// 大段样式: 色#00BFFF, 宽4px
 // big_segment索引→segments→strokes (两层解析)
 // 方向: ±1000 区分于笔和段
 unsafe extern "C" fn big_segments_fn(
@@ -308,7 +307,7 @@ unsafe extern "C" fn superior_segments_fn(
 
 // ── 笔轨道 (Stroke Bands) ──
 // mark 5=上轨(DimGray), mark 6=下轨(DimGray)
-/// 对齐 Flowsurface kline.rs L982-1030: COLOR696969, 1px, step-style
+/// 样式: COLOR696969, 1px, step-style
 /// Case1 (三重顶/底) + Case2 (1.618扩张) + Case3 (转多/转空) + Case4 (V信号) + 追踪
 unsafe extern "C" fn stroke_band_fn(
     data_len: c_int,
@@ -590,7 +589,7 @@ unsafe extern "C" fn stroke_band_fn(
 
 // ── 线段轨道 (Segment Bands) ──
 // mark 7=上轨(COLORFF00FF), mark 8=下轨(COLORFF00FF)
-/// 对齐 Flowsurface: Case1 (三重顶/底) + Case2 (1.618扩张) + Case3 (转多/转空) + 追踪
+/// Case1 (三重顶/底) + Case2 (1.618扩张) + Case3 (转多/转空) + 追踪
 /// 与库guidao.rs L647-959 calc_seg_upper/lower_band_case1+case2+case3完全一致
 unsafe extern "C" fn segment_band_fn(
     data_len: c_int,
@@ -609,8 +608,8 @@ unsafe extern "C" fn segment_band_fn(
     let pl_strokes = &pipeline.strokes;
     let is_upper = m == 7;
 
-    // 2026-08-24: 全量下沉库 (对齐 flowsurface app chanlun_guidao.rs compute_segment_tracked_bands 直接委派库)
-    // 旧手写 Case3/4 与库"一个线段当大段"状态机不一致, 是伪转多/伪转空 BUG 根源 (提交 9386187)
+    // 轨道计算全量下沉基础库: compute_segment_tracked_bands 直接委派库
+    // 旧手写 Case3/4 与库"一个线段当大段"状态机不一致, 是伪转多/伪转空 BUG 根源
     let (seg_upper, seg_lower) = guidao::compute_segment_bands(
         segs, &pipeline.big_segments, pl_strokes, &highs, &lows, &pipeline.final_fractals,
     );
@@ -630,19 +629,19 @@ unsafe extern "C" fn segment_band_fn(
     write_output(out, dl, &values);
 }
 
-// ── 大段轨道共用: 库 Case1-4+追踪 (2026-08-24: 轨道取值三级统一, 下沉库) → 逐bar轨道线 ──
+// ── 大段轨道共用: 库 Case1-4+追踪 (轨道取值三级统一) → 逐bar轨道线 ──
 fn compute_big_seg_band_line(
     big_segs: &[(usize, usize, bool)],
     segs: &[(usize, usize, bool)],
     pl_strokes: &[chanlun_lean_lib::Stroke],
     superior_segs: &[(usize, usize, bool)],
-    final_fractals: &[chanlun_lean_lib::Fractal], // 2026-08-25: 分型确认bar落点 (三级轨道同构)
+    final_fractals: &[chanlun_lean_lib::Fractal], // 分型确认bar落点 (三级轨道同构)
     highs: &[f64],
     lows: &[f64],
     is_upper: bool,
     dl: usize,
 ) -> Vec<f32> {
-    // 全量下沉库 (对齐 flowsurface app compute_bigseg_tracked_bands 直接委派库)
+    // compute_bigseg_tracked_bands 直接委派库
     let (upper_band, lower_band, _, _) = guidao::compute_bigseg_bands(
         big_segs, segs, pl_strokes, superior_segs, final_fractals, highs, lows,
     );
@@ -693,7 +692,7 @@ unsafe extern "C" fn big_segment_band_fn(
     write_output(out, dl, &values);
 }
 
-// ── 买卖点标记输入链 (社区版: 中枢 → 二买二卖 → 三买三卖 → 2+N买/卖 → 中阴撤回过滤) ──
+// ── 买卖点标记输入链 (中枢 → 二买二卖 → 三买三卖 → 2+N买/卖 → 撤回过滤) ──
 // 返回 (second_markers, third_markers), 供 mark 37 输出 (mode 1-4)
 fn build_markers(
     sups: &[(usize, usize, bool)],
@@ -707,7 +706,7 @@ fn build_markers(
     Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>,
 ) {
     let zs = chanlun_lean_lib::zhongshu::detect_bigseg_zhongshus(sups, bigs, segs, strokes);
-    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数, GUI 两函数合并)
+    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数)
     let mut sm = chanlun_lean_lib::detect_second_buy_markers(strokes, segs, bigs, sups);
     sm.extend(chanlun_lean_lib::detect_second_sell_markers(strokes, segs, bigs, sups));
     let tm = chanlun_lean_lib::zhongshu::detect_bigseg_third_marks(sups, bigs, segs, strokes, &zs, highs, lows);
@@ -716,12 +715,12 @@ fn build_markers(
     let (buc1, ub) = guidao::calc_bigseg_upper_band_case1(bigs, segs, strokes);
     let mut pm = guidao::detect_bigseg_cf_buy_markers(sups, bigs, segs, strokes, &blc1, &db, &ub);
     pm.extend(guidao::detect_bigseg_cf_sell_markers(sups, bigs, segs, strokes, &buc1, &ub, &db));
-    // 中阴撤回过滤: 标记输出=过滤后标记
+    // 撤回过滤: 标记输出=过滤后标记
     let rf = guidao::apply_sup_retreat_filter(sups, bigs, segs, strokes, sm, tm, pm);
     (rf.second_markers, rf.third_markers)
 }
 
-// ── 二买/二卖/三买/三卖 文字标记 (mark 37, 2026-08-11 对齐 MT4 chanlun_markers) ──
+// ── 二买/二卖/三买/三卖 文字标记 (mark 37) ──
 // mode 1=二买 2=二卖 3=三买 4=三卖; 输出=标记价格 (文字定位点)
 unsafe extern "C" fn buy_sell_markers_fn(
     data_len: c_int,
@@ -754,7 +753,7 @@ unsafe extern "C" fn buy_sell_markers_fn(
     write_output(out, dl, &values);
 }
 
-// ── 大段中枢 ZG/ZD (marks 39/40, 2026-08-11 对齐 MT4 chanlun_zhongshus) ──
+// ── 大段中枢 ZG/ZD (marks 39/40) ──
 // mode 39=ZG, 40=ZD; 输出=中枢区间 [start_bar, end_bar] 内逐bar填值 (画矩形上下沿)
 unsafe extern "C" fn zhongshu_fn(
     data_len: c_int,
@@ -812,7 +811,7 @@ static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 20] = [
     PluginTCalcFuncInfo { n_func_mark: 40, p_call_func: Some(zhongshu_fn) },
     PluginTCalcFuncInfo { n_func_mark: 41, p_call_func: Some(zhongshu_fn) },
     PluginTCalcFuncInfo { n_func_mark: 42, p_call_func: Some(zhongshu_fn) },
-    // ── 参数设置 (2026-09-05): 46=设笔 case 参数, 49=设线段~高级段 case 参数 ──
+    // ── 参数设置: 46=设笔 case 参数, 49=设线段~高级段 case 参数 ──
     PluginTCalcFuncInfo { n_func_mark: 46, p_call_func: Some(set_stroke_cases_fn) },
     PluginTCalcFuncInfo { n_func_mark: 49, p_call_func: Some(set_level_cases_fn) },
     PluginTCalcFuncInfo { n_func_mark: 0, p_call_func: None },
@@ -1004,7 +1003,7 @@ mod tests {
         eprintln!("✓ fractal output verified: {} fractals, all alternating", ff.len());
     }
 
-    /// 验证 g1==g2 时笔管线正常输出 (对齐 flowsurface, 无后置过滤)
+    /// 验证 g1==g2 时笔管线正常输出 (无后置过滤)
     /// 场景: d1(3.84)→g1(3.94)→d2(3.85)→g2(3.94)
     #[test]
     fn test_g1_equals_g2_pipeline_ok() {
@@ -1180,7 +1179,7 @@ mod tests {
         use chanlun_lean_lib::guidao;
 
         // === 上轨Case4: 转多→V空 ===
-        // 2026-08-24 新API状态机方案 (collect_segment_case3_events):
+        // 新API状态机方案 (collect_segment_case3_events):
         // Stroke 3: 上升 10→50 经 C3 升格 (50 > dn0 起点 40) → 转多事件 (3,0,2)
         // Stroke 4: 下降 50→5  经 C3 升格 (5 < up3 起点 10) → 转空事件 (4,3,3) → V空
         let strokes_upper = vec![
@@ -1215,7 +1214,7 @@ mod tests {
         assert_eq!(lower_from_vs.len(), 0, "lower from V空 signals: expected 0");
 
         // === 下轨Case4: 转空→V多 ===
-        // 2026-08-24 新API状态机方案 (collect_segment_case3_events):
+        // 新API状态机方案 (collect_segment_case3_events):
         // Stroke 3: 下降 35→5  经 C3 升格 (5 < up0 起点 10) → 转空事件 (3,0,2)
         // Stroke 4: 上升 5→40 经 C3 升格 (40 > dn3 起点 35) → 转多事件 (4,3,3) → V多
         let strokes_lower = vec![
@@ -1396,7 +1395,7 @@ mod tests {
         use chanlun_lean_lib::guidao;
 
         // === 上轨Case3: 转空 ===
-        // 2026-08-24 新API状态机方案: up_seg2 经 C2 ok (end_idx=2), dn_seg3(60→5)
+        // 新API状态机方案: up_seg2 经 C2 ok (end_idx=2), dn_seg3(60→5)
         // 经 C3 升格 (5 < up0 起点 10) → 转空事件 (3,0,2) → 点=up_seg2 终点 60@bar30
         let strokes_upper = vec![
             Stroke { start_price: 10.0, end_price: 50.0, start_bar: 0,  end_bar: 10, is_up: true },
@@ -1421,7 +1420,7 @@ mod tests {
         assert!((upper_bp[0].value - 60.0).abs() < 0.001, "value should be a_high=60");
 
         // === 下轨Case3: 转多 ===
-        // 2026-08-24 新API状态机方案: dn_seg2 经 C2 ok (end_idx=2), up_seg3(5→55)
+        // 新API状态机方案: dn_seg2 经 C2 ok (end_idx=2), up_seg3(5→55)
         // 经 C3 升格 (55 > dn0 起点 50) → 转多事件 (3,0,2) → 点=dn_seg2 终点 5@bar30
         let strokes_lower = vec![
             Stroke { start_price: 50.0, end_price: 10.0, start_bar: 0,  end_bar: 10, is_up: false },
@@ -1467,7 +1466,7 @@ mod tests {
         use chanlun_lean_lib::guidao;
 
         // === 上轨Case4: 转多→V空 ===
-        // 2026-08-24 新API状态机方案:
+        // 新API状态机方案:
         // seg3=up(5→55) 经 C3 升格 (55 > dn0 起点 50) → 转多事件 (3,0,2)
         // seg4=down(45→3) 经 C3 升格 (3 < up3 起点 5) → 转空事件 (4,3,3) → V空
         let strokes_upper = vec![
@@ -1505,7 +1504,7 @@ mod tests {
         assert_eq!(lower_from_vs.len(), 0, "lower from V空 signals: expected 0");
 
         // === 下轨Case4: 转空→V多 ===
-        // 2026-08-24 新API状态机方案:
+        // 新API状态机方案:
         // seg3=down(35→5) 经 C3 升格 (5 < up0 起点 10) → 转空事件 (3,0,2)
         // seg4=up(5→40) 经 C3 升格 (40 > dn3 起点 35) → 转多事件 (4,3,3) → V多
         let strokes_lower = vec![
@@ -1715,7 +1714,7 @@ mod tests {
         eprintln!("✓ 大段轨道Case2 verified: 上轨扩张=1pt, 下轨扩张=1pt, negative=0pt");
     }
 
-    /// 验证大段轨道Case3 (新API, 2026-08-24): 高级段状态机 Case3 升格 → 转多/转空
+    /// 验证大段轨道Case3 (新API): 高级段状态机 Case3 升格 → 转多/转空
     /// 旧 inner_big 方案 (build_inner_big_segments) 已随库移除 (提交 9386187: 伪转多/伪转空 BUG 根源)
     #[test]
     fn test_bigseg_band_case3() {
@@ -1761,7 +1760,7 @@ mod tests {
         eprintln!("✓ 大段轨道Case3 (新API) verified: 转多→下轨1pt, 上轨0pt, V=0");
     }
 
-    /// 验证大段轨道Case4 (新API, 2026-08-24): 转多 j 之后 j+1 紧邻反向升格 → V空
+    /// 验证大段轨道Case4 (新API): 转多 j 之后 j+1 紧邻反向升格 → V空
     #[test]
     fn test_bigseg_band_case4() {
         use chanlun_lean_lib::Stroke;
@@ -1806,7 +1805,7 @@ mod tests {
 
         eprintln!("✓ 大段轨道Case4 (新API) verified: 转多+紧邻转空→V空→上轨1pt, 下轨0pt");
     }
-    /// 参数化: mark 46/49 设置 case 参数并失效重建管线 (2026-09-05)
+    /// 参数化: mark 46/49 设置 case 参数并失效重建管线
     #[test]
     fn test_set_cases_invalidates_pipeline_and_table_registered() {
         // 1) 函数表须注册 mark 46/49 (TDX lookup 按 n_func_mark; 走真实注册路径)

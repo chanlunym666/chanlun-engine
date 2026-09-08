@@ -1,4 +1,4 @@
-//! Python bi_Case123.py vs Rust chanlun_lean_lib 对比测试
+//! 笔算法输出对比测试 (C1+C2+C3) — 同一组模拟K线验证分型/笔输出
 //! 
 //! 用法: cargo test compare -- --nocapture
 //! 

@@ -1,5 +1,4 @@
 //! 缠论算法纯Rust库 — 零依赖, 可嵌入任意Rust项目
-//! 与 Python chanlun_a_lujing.py 逐行对等
 
 #[cfg(feature = "guidao")]
 pub mod guidao;
@@ -172,7 +171,7 @@ fn check_down_stroke_case2(fractal_arr: &[Fractal], count: usize, start_idx: usi
     (false, end_idx)
 }
 
-// ===== 笔Case4 (事后修正, 2026-09-05 用户定版: 直接映射线段Case4; 禁止参考任何mq4) =====
+// ===== 笔Case4 (事后修正: 直接映射线段Case4) =====
 // 线段Case4: 单笔A包含后续(反向Case2段 + 同向Case2段)段对 → A以"一笔当线段"升格为线段.
 // 笔Case4 同构映射: 候选笔 (last→current) 之后的分形序列若已自然形成完整"两笔结构"
 //   (先反向后同向的两段虚拟笔, 各自满足类似Case2的连续新低/新高收口条件),
@@ -321,7 +320,7 @@ pub fn process_strokes_fractals(valid_fractals: &[Fractal], case3_enabled: bool,
     process_strokes_fractals_with_cases(valid_fractals, case3_enabled, true, min_bars)
 }
 
-/// 笔构建完整实现 (2026-09-05 用户定版: 缠论共振指标参数化, case4 可开关).
+/// 笔构建完整实现 (参数化: case4 可开关).
 /// case3_enabled = C3 强势突破 + F1 修正开关; case4_enabled = C4 事后修正升格开关.
 /// process_strokes_fractals (3参) = case4 恒开的历史行为, 输出零变化.
 fn process_strokes_fractals_with_cases(valid_fractals: &[Fractal], case3_enabled: bool, case4_enabled: bool, min_bars: usize) -> Vec<Fractal> {
@@ -408,7 +407,7 @@ fn process_strokes_fractals_with_cases(valid_fractals: &[Fractal], case3_enabled
                 }
             }
 
-            // C4: 事后修正升格 (2026-09-05 用户定版, 直接映射线段Case4; case4_enabled 开关)
+            // C4: 事后修正升格 (直接映射线段Case4; case4_enabled 开关)
             // 终点尚未被 C1/C3/F1 锁为 current 时 (含 C2 延伸至更劣终点/三路全败),
             // 若 current 之后已自然形成完整两笔结构且整体包含于 (last.price, current.price)
             // → 候选笔 (last→current) 事后升格, 以 current 落笔 (链从 current 之后继续).
@@ -434,15 +433,15 @@ fn process_strokes_fractals_with_cases(valid_fractals: &[Fractal], case3_enabled
         }
     }
 
-    // ── 初始数据入口·链头前置反向笔 (2026-09-06 用户定版) ──
+    // ── 初始数据入口·链头前置反向笔 ──
     // 窗口起点滑动区 (final[0] 之前、被"隔位同向替换"吸收掉的分型) 内若存在与 final[0]
     // 异向的极值分型 bm, 且 (bm → final[0]) 满足标准笔条件 (C1: bar 间隔 + merged 间隔
     // + 区间无干扰), 则以 bm 为链起点前置插入 — 第一笔 = bm→final[0] (反向笔),
     // 后续链逐位不变 (前置插入后原链各端点仍是交替序列, 输出与原链完全一致).
     // 语义: 初始数据第一个反向(顶/底)分型满足分型+笔条件即可成为第一笔起点,
-    // 无需其前存在可成笔的前导分型 (用户案例: XAUUSD M30 顶2031.22@18:00 →
-    // 延伸底2019.66@次日02:00 画向下第一笔; 旧行为链起点绑定首分型同向族极值,
-    // 顶分型永远没有机会成为笔起点).
+    // 无需其前存在可成笔的前导分型: 窗口起点滑动区内与链首异向的极值分型
+    // 即可成为第一笔起点 (旧行为链起点绑定首分型同向族极值,
+    // 反向分型永远没有机会成为笔起点).
     if final_fractals.len() >= 2 {
         let a0 = &final_fractals[0];
         if let Some(a0_idx) = valid_fractals
@@ -537,7 +536,7 @@ fn check_up_segment_case3(
         if !strokes[i].is_up {
             let (ok, end_i) = seg_case2_cache[i];
             if ok {
-                // MT4 防线2: 反向 Case2 段必须完整结束在当前笔开始之前
+                // 守卫: 反向 Case2 段必须完整结束在当前笔开始之前
                 if end_i >= start_idx { return (false, start_idx, usize::MAX); }
                 return (high_a > strokes[i].start_price, start_idx, i);
             }
@@ -564,7 +563,7 @@ fn check_down_segment_case3(
         if strokes[i].is_up {
             let (ok, end_i) = seg_case2_cache[i];
             if ok {
-                // MT4 防线2: 反向 Case2 段必须完整结束在当前笔开始之前
+                // 守卫: 反向 Case2 段必须完整结束在当前笔开始之前
                 if end_i >= start_idx { return (false, start_idx, usize::MAX); }
                 return (low_a < strokes[i].start_price, start_idx, i);
             }
@@ -620,7 +619,7 @@ fn check_up_segment_case4(strokes: &[Stroke], start_idx: usize) -> (bool, usize)
 
     if down_seg_end < 0 || up_seg_end < 0 { return (false, start_idx); }
 
-    // 2026-08-14 BUG修复: 检查窗口覆盖 [start_idx+1, ...) 含被跳过的反向笔(GBPUSD 5分钟 7.1 根因a)
+    // BUG修复: 检查窗口覆盖 [start_idx+1, ...) 含被跳过的反向笔
     // 原实现从 down_seg_start/up_seg_start 起查, 紧邻反向笔若不满足Case2被跳过则其突破被漏检
     let real_down_low = get_real_seg_end_price(strokes, start_idx + 1, false, up_seg_start as usize);
     if real_down_low <= low_a { return (false, start_idx); }
@@ -660,7 +659,7 @@ fn check_down_segment_case4(strokes: &[Stroke], start_idx: usize) -> (bool, usiz
 
     if up_seg_end < 0 || down_seg_end < 0 { return (false, start_idx); }
 
-    // 2026-08-14 BUG修复: 检查窗口覆盖 [start_idx+1, ...) 含被跳过的反向笔(GBPUSD 5分钟 7.1 根因a)
+    // BUG修复: 检查窗口覆盖 [start_idx+1, ...) 含被跳过的反向笔
     // 原实现从 up_seg_start/down_seg_start 起查, 紧邻反向笔若不满足Case2被跳过则其突破被漏检
     let real_up_high = get_real_seg_end_price(strokes, start_idx + 1, true, down_seg_start as usize);
     if real_up_high >= high_a { return (false, start_idx); }
@@ -672,13 +671,12 @@ fn check_down_segment_case4(strokes: &[Stroke], start_idx: usize) -> (bool, usiz
 }
 
 pub fn process_segments(strokes: &[Stroke]) -> Vec<(usize, usize, bool)> {
-    // 线段层: Case2/Case3/Case4 全部输出 (Case3 保留, 2026-08-19)
+    // 线段层: Case2/Case3/Case4 全部输出 (Case3 保留)
     process_segments_with_cases(strokes, true, true)
 }
 
-/// 段构建主逻辑 (线段/大段共用). enable_case3=true 时正常输出 Case3 候选
-/// (2026-08-19 上午大段层曾临时隐藏 Case3 只输出 Case2/4, 验证 Case4 正确后恢复)
-/// 2026-09-05 用户定版: 统一参数化 — enable_case4=false 时关闭 Case4 事后修正候选
+/// 段构建主逻辑 (线段/大段共用): enable_case3=true 时正常输出 Case3 候选,
+/// enable_case4=false 时关闭 Case4 事后修正候选.
 /// (process_segments / process_segments_with_case3 旧签名为全开包装)
 pub fn process_segments_with_cases(
     strokes: &[Stroke],
@@ -699,9 +697,9 @@ pub fn process_segments_with_cases(
     let mut c3_seg_starts: Vec<bool> = vec![false; count];
     let mut i: usize = 0;
     let mut looking_for_up = true;
-    // 2026-09-06 用户定版: 首段向下兜底 (同构高级段方案B) — 窗口起点若先出现向下笔
+    // 首段向下兜底 (与高级段层同构): 窗口起点若先出现向下笔
     // (初始数据无前导向上结构), 该向下笔满足段条件 (C2/C3/C4) 也直接建成第一条向下线段,
-    // 不再以"隐含向上前提"跳过; 大段层经投影复用本函数自动继承 (process_big_segments L846).
+    // 不再以"隐含向上前提"跳过; 大段层经投影复用本函数自动继承.
     let mut first = true;
 
     while i < count {
@@ -744,7 +742,7 @@ pub fn process_segments_with_cases(
 
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if first && !strokes[i].is_up {
-            // 首段向下兜底 (方案B 同构高级段): 尚未建立任何线段时, 向下笔
+            // 首段向下兜底 (与高级段层同构): 尚未建立任何线段时, 向下笔
             // Case2/Case3/Case4 成立也直接作为第一条线段 — 下跌行情/初始数据起点
             // 处向上段条件永不成立时, 向下笔不再被跳过 (不再以向上段为隐含前提).
             let mut candidates: Vec<usize> = Vec::new();
@@ -804,14 +802,14 @@ pub fn process_segments_with_cases(
 /// 状态机 Case3 建段事件收集 (供 guidao.rs 转空/转多信号对齐线段 Case3).
 /// 重放 process_segments_with_case3 主循环 (复用同一套 C2/C3/C4 判定函数),
 /// 捕获每个经 Case3 建立的段: 返回 (触发笔 j, 基准笔 base_i, 基准段终点 end_i, 段方向 is_up).
-/// 8/7 案例: 向下笔 1554 经 Case3 建段, 基准笔 1551 非线段起点 (seg[356] 内部笔),
-///           其 C2 段 [1551..1553] 被消费但 seg_case2_cache 仍 ok → 回溯以它为基准.
+/// 案例: 向下笔经 Case3 建段时, 基准笔可为非线段起点的内部笔,
+///       其 C2 段被消费但 seg_case2_cache 仍 ok → 回溯以它为基准.
 /// 算法零改动: 仅收集事件, 不影响 segments 构建.
 pub fn collect_segment_case3_events(strokes: &[Stroke]) -> Vec<(usize, usize, usize, bool)> {
     collect_segment_case3_events_with_cases(strokes, true, true)
 }
 
-/// 线段 Case3 事件收集带统一 levels 参数版 (2026-09-05):
+/// 线段 Case3 事件收集带统一 levels 参数版:
 /// enable_case3/4 必须与 process_segments_with_cases 同参, 保证事件与段结构一致.
 pub fn collect_segment_case3_events_with_cases(
     strokes: &[Stroke],
@@ -832,8 +830,8 @@ pub fn collect_segment_case3_events_with_cases(
     let mut c3_seg_starts: Vec<bool> = vec![false; count];
     let mut i: usize = 0;
     let mut looking_for_up = true;
-    // 2026-09-06 用户定版: 与 process_segments_with_cases 首段向下兜底完全同步
-    // (事件收集必须与段构建同构, 否则轨道信号引用不存在的 C3 段 — 技能教训)
+    // 与 process_segments_with_cases 首段向下兜底完全同步
+    // (事件收集必须与段构建同构, 否则轨道信号会引用不存在的 C3 段)
     let mut first = true;
 
     while i < count {
@@ -861,7 +859,7 @@ pub fn collect_segment_case3_events_with_cases(
             if enable_case4 && ok_c4 { candidates.push(i); }
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if first && !strokes[i].is_up {
-            // 首段向下兜底 (方案B): 与 process_segments_with_cases 首段分支完全一致
+            // 首段向下兜底: 与 process_segments_with_cases 首段分支完全一致
             let mut candidates: Vec<usize> = Vec::new();
             let (ok_c2, end_i_c2) = seg_case2_cache[i];
             if ok_c2 { candidates.push(end_i_c2); }
@@ -898,12 +896,12 @@ pub fn collect_segment_case3_events_with_cases(
 // ===== 大段 (投影法: 线段→Stroke, 复用 process_segments 逻辑; Case3 正常输出) =====
 /// 将线段数组投影为 Stroke 数组，每个"Stroke"代表一条线段，
 /// 然后直接调用已验证的 process_segments 逻辑，零逻辑偏差。
-/// 2026-08-19: 验证 Case4 正确后恢复 Case3 正常输出 (线段/大段/高级段三分支一致).
+/// 线段/大段/高级段三分支一致: Case2/3/4 全部输出.
 pub fn process_big_segments(strokes: &[Stroke], segs: &[(usize, usize, bool)]) -> Vec<(usize, usize, bool)> {
     process_big_segments_with_cases(strokes, segs, true, true)
 }
 
-/// 大段 (投影法) 带统一 levels 参数版 (2026-09-05 用户定版: 与大段共用线段算法 C3/C4 门).
+/// 大段 (投影法) 带统一 levels 参数版 (共用线段算法 C3/C4 门).
 pub fn process_big_segments_with_cases(
     strokes: &[Stroke],
     segs: &[(usize, usize, bool)],
@@ -924,7 +922,7 @@ pub fn process_big_segments_with_cases(
         })
         .collect();
 
-    // 2026-08-19: 大段层恢复 Case3 正常输出 (Case2/3/4 全部输出)
+    // 大段层 Case2/3/4 全部输出
     process_segments_with_cases(&projected, enable_case3, enable_case4)
 }
 
@@ -944,7 +942,7 @@ pub fn collect_superior_case3_events(
     collect_superior_case3_events_with_cases(strokes, segs, bigs, true, true)
 }
 
-/// 高级段 Case3 事件收集带统一 levels 参数版 (2026-09-05):
+/// 高级段 Case3 事件收集带统一 levels 参数版:
 /// enable_case3/4 必须与 process_superior_segments_with_cases 同参, 保证事件与段结构一致.
 pub fn collect_superior_case3_events_with_cases(
     strokes: &[Stroke],
@@ -1012,7 +1010,7 @@ pub fn collect_superior_case3_events_with_cases(
             if enable_case4 && ok_c4 { candidates.push(i); }
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if first && !projected[i].is_up {
-            // 首段向下兜底 (方案B): 与 process_superior_segments 主循环分支完全一致
+            // 首段向下兜底: 与 process_superior_segments 主循环分支完全一致
             let mut candidates: Vec<usize> = Vec::new();
             let (ok_c2, end_i_c2) = case2_cache[i];
             if ok_c2 { candidates.push(end_i_c2); }
@@ -1047,9 +1045,8 @@ pub fn collect_superior_case3_events_with_cases(
 
 // ===== 高级段 (投影法: 大段→虚拟大段, Case2+Case3+Case4+延伸) =====
 /// 将大段数组投影为 Stroke 数组，每个"Stroke"代表一条大段，
-/// 然后执行 Case2 + Case3 + Case4 线段逻辑 + 端点延伸 (2026-08-19 高级段补 Case4,
-/// 与"大段 = 投影后完整复用线段算法(含Case4)"同构, 三分支行为一致;
-/// 同日验证 Case4 正确后恢复 Case3 正常输出).
+/// 然后执行 Case2 + Case3 + Case4 线段逻辑 + 端点延伸 (高级段层含 Case4,
+/// 与"大段 = 投影后完整复用线段算法(含Case4)"同构, 三分支行为一致).
 /// 100% 对齐 process_segments 的 C2/C3/C4 + extension 逻辑，零偏差。
 pub fn process_superior_segments(
     strokes: &[Stroke],
@@ -1059,7 +1056,7 @@ pub fn process_superior_segments(
     process_superior_segments_with_cases(strokes, segs, bigs, true, true)
 }
 
-/// 高级段 (投影法) 带统一 levels 参数版 (2026-09-05 用户定版: C3/C4 可关).
+/// 高级段 (投影法) 带统一 levels 参数版 (C3/C4 可关).
 /// 旧 3 参签名 = 全开包装, 行为与历史完全一致.
 pub fn process_superior_segments_with_cases(
     strokes: &[Stroke],
@@ -1138,7 +1135,7 @@ pub fn process_superior_segments_with_cases(
 
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if first && !projected[i].is_up {
-            // 首段向下兜底 (方案B): 尚未建立任何高级段时,
+            // 首段向下兜底: 尚未建立任何高级段时,
             // 向下段 Case2/Case3 成立也直接作为第一条高级段 — 下跌行情中
             // 反弹(向上)段 Case2 永不成立(不创新高), 方向永不翻转导致向下段
             // 被跳过而无法建段; 此处允许第一条向下段直接建立。
@@ -1195,7 +1192,7 @@ pub fn process_superior_segments_with_cases(
     superior_segs
 }
 
-// ===== 二买/二卖检测 (高级段 "//" 结构两侧大段比较, 2026-08-09 用户定义) =====
+// ===== 二买/二卖检测 (高级段 "//" 结构两侧大段比较) =====
 /// 二买: 向下高级段终点 B (低点) → A = B 左侧最近向上大段终点,
 ///       C = B 右侧最近向上大段终点 (需 > A), D = C 后第一个向下大段终点 (需 > B 不创新低)
 ///       → 标记"二买" (文字, 不画箭头)
@@ -1349,8 +1346,8 @@ pub fn detect_second_sell_markers(
 
 // ===== 高层API: 一键全管线计算 =====
 // ===== 高层API: 一键全管线计算 =====
-/// 笔构建 Case 配置 (2026-09-05 用户定版: 缠论共振指标参数 0/3/4/5, 数字即被关闭的 case;
-/// 5=关case3+4 全关 (原 34, 2026-09-05 改值以利 TDX/MT4 应用; 旧值 34 兼容).
+/// 笔构建 Case 配置: 缠论指标参数 0/3/4/5, 数字即被关闭的 case;
+/// 5=关case3+4 全关 (旧值 34 兼容).
 /// 默认全开 = 与 ChanlunPipeline::new 完全一致的现行行为 (参数化零回归).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrokeCases {
@@ -1365,8 +1362,8 @@ impl Default for StrokeCases {
 }
 
 impl StrokeCases {
-    /// 用户参数值 → 开关: 0=全开, 3=关case3, 4=关case4, 5=关case34 (2026-09-05 由 34 改值);
-    /// 旧值 34 兼容映射全关; 未知值按全开.
+    /// 参数值 → 开关: 0=全开, 3=关case3, 4=关case4, 5|34=关case3+4 (全关);
+    /// 未知值按全开.
     pub fn from_param(v: u8) -> Self {
         match v {
             3 => Self { case3: false, case4: true },
@@ -1394,13 +1391,13 @@ impl ChanlunPipeline {
         Self::new_with_cases(highs, lows, StrokeCases::default(), StrokeCases::default())
     }
 
-    /// 带笔 Case 配置的管线入口 (2026-09-05 用户定版: 指标参数化).
+    /// 带笔 Case 配置的管线入口.
     /// new() 委托本函数且默认全开 → 历史行为零变化 (参数化零回归).
     pub fn new_with_stroke_cases(highs: Vec<f64>, lows: Vec<f64>, cases: StrokeCases) -> Self {
         Self::new_with_cases(highs, lows, cases, StrokeCases::default())
     }
 
-    /// 全参数管线入口 (2026-09-05 用户定版: 线段/大段/高级段 共用统一 levels 开关):
+    /// 全参数管线入口 (线段/大段/高级段共用统一 levels 开关):
     /// stroke_cases = 笔 C3/C4 开关; levels_cases = 线段/大段/高级段统一 C3/C4 开关.
     /// new()/new_with_stroke_cases 委托本函数且默认全开 → 历史行为零变化.
     pub fn new_with_cases(
@@ -1481,7 +1478,7 @@ mod tests {
 
     #[test]
     fn test_second_buy_markers() {
-        // 二买 (// 结构, 映射自顶级段阀门分支1):
+        // 二买 (向下高级段反转后的回试结构):
         // 向下高级段 B=笔3 终点 100; A=笔2 终点 110; C=笔4 终点 112(>A); D=笔5 终点 104(>B)
         // 预期: 1 个标记 (文字"二买"), 画在 D 终点 (笔5 的 bar, 104)
         let strokes = vec![
@@ -1636,7 +1633,7 @@ mod tests {
 
     #[test]
     fn test_superior_segments_down_first() {
-        // 回归: 下跌行情中向下高级段必须可构建 (2026-08-09 对齐顶级段方案B: 首段允许向下)
+        // 回归: 下跌行情中向下高级段必须可构建 (首段允许向下)
         // 笔序列: 反弹1(110→115) 下跌1(115→100) 反弹2(100→103) 下跌2(103→95) 反弹3(95→97) 下跌3(97→90)
         // 投影后: up(110→115) down(115→100) up(100→103) down(103→95) up(95→97) down(97→90)
         // up@0 Case2 不成立(反弹未创新高) → down@1 Case3 不成立(无前 Case2 up 段) → 首段兜底仅 Case2
@@ -1675,7 +1672,7 @@ mod tests {
 
     #[test]
     fn test_superior_segments_up_case4() {
-        // 高级段 Case4 (2026-08-19 用户定版: 三分支行为一致): 单向上大段 A 包含
+        // 高级段 Case4 (三分支行为一致): 单向上大段 A 包含
         // 完整的反向(下)+同向(上)大段对 → A 修正为高级段 (endIdx = 自身)
         // 序列: up(110→120) down(120→112) down(112→111) up(111→116) up(116→119)
         // down@1→down@2 Case2 (低点连创新低), up@3→up@4 Case2 (低点抬高+高点创新高)
@@ -1698,7 +1695,7 @@ mod tests {
 
     #[test]
     fn test_superior_segments_down_case4_first() {
-        // 高级段 Case4 首段向下兜底分支 (2026-08-19): 首条向下大段 A 含完整
+        // 高级段 Case4 首段向下兜底分支: 首条向下大段 A 含完整
         // 反向(上)+同向(下)大段对 → 同样修正为高级段 (与分支1/2行为一致)
         // 序列: down(120→110) up(110→118) up(118→119) down(119→112) down(112→111)
         // up@1→up@2 Case2, down@3→down@4 Case2; 反向极值 119 < 120, 同向极值 111 >= 110
@@ -1720,7 +1717,7 @@ mod tests {
 
     #[test]
     fn test_superior_segments_down_case4() {
-        // 高级段 Case4 非首段向下分支 (2026-08-19): 首段向上建立后, 单向下大段 B
+        // 高级段 Case4 非首段向下分支: 首段向上建立后, 单向下大段 B
         // 含完整反向(上)+同向(下)大段对 → B 修正为高级段
         // 序列: up(100→110) up(110→115) down(115→105) up(105→113) up(113→114) down(114→107) down(107→106)
         // 首段 up@0 Case2 → (0,1,true); B 反向极值 114 < 115, 同向极值 106 >= 105 → Case4 成立
@@ -1743,7 +1740,7 @@ mod tests {
 
     #[test]
     fn test_superior_segments_up_case4_rejected_when_break_high() {
-        // 高级段 Case4 否定 (2026-08-19): 同向大段突破 A 终点 (real_up_high > high_a)
+        // 高级段 Case4 否定: 同向大段突破 A 终点 (real_up_high > high_a)
         // → Case4 拒绝; 但突破同时使 A 的 Case2 成立 → 走 Case2 (endIdx = 突破笔)
         // 序列: up(110→120) down(120→112) down(112→111) up(111→116) up(116→121)
         // up@3→up@4 Case2 且 up@4 终点 121 > 120 → A Case2 成立 end=4
@@ -1764,8 +1761,8 @@ mod tests {
 
     #[test]
     fn test_case3_output_bigseg_and_superior() {
-        // 2026-08-19 用户定版: 大段/高级段恢复 Case3 正常输出 (线段/大段/高级段三分支一致)
-        // 2026-09-06 用户定版: 线段/大段层同构首段向下兜底 (初始数据特殊情况) — 三层行为一致.
+        // 大段/高级段 Case3 正常输出 (线段/大段/高级段三分支一致)
+        // 线段/大段层同构首段向下兜底 (初始数据特殊情况) — 三层行为一致.
         // 序列: down(100→90) down(90→85) up(85→105)
         // 线段层: 首段兜底 down@0→down@1 Case2 → (0,1,false); up@2 突破前置 down Case2 段起点 100
         //         → Case3 成立 → (2,2,true)
@@ -1792,13 +1789,13 @@ mod tests {
 
     #[test]
     fn test_superior_case4_aligns_bigseg_case4() {
-        // 高级段 Case4 与大段 Case4 对齐验证 (2026-08-19): 同一虚拟序列分别走
+        // 高级段 Case4 与大段 Case4 对齐验证: 同一虚拟序列分别走
         // "大段层" (process_big_segments: 线段→投影→process_segments, 含原生 Case4) 与
         // "高级段层" (process_superior_segments: 大段→投影→C2/C3/C4), 两路径输入等价
         // (segs/bigs 均为恒等映射 → 投影数组 = 原始笔序列).
         // 断言1/2: 首段向上场景两路径输出必须完全一致 → 证明高级段 Case4 挂载与
         // process_segments 原生 Case4 零偏差 (同一函数/同一候选/同一排序/同一推进).
-        // 断言3: 首段向下场景差异仅为方案B首段兜底 (有意行为), 后续段仍与大段层一致.
+        // 断言3: 首段向下场景差异仅为首段兜底 (有意行为), 后续段仍与大段层一致.
         let mk = |strokes: Vec<Stroke>| {
             let segs: Vec<(usize, usize, bool)> = strokes.iter().enumerate()
                 .map(|(i, s)| (i, i, s.is_up)).collect();
@@ -1832,7 +1829,7 @@ mod tests {
         let sup2 = process_superior_segments(&s2, &segs2, &bigs2);
         assert_eq!(sup2, big2, "场景2(向下Case4) 两路径不一致: sup2={:?} big2={:?}", sup2, big2);
 
-        // 场景3: 首段向下 (2026-09-06 大段层同构首段兜底后, 两路径输出完全一致)
+        // 场景3: 首段向下 (大段层同构首段兜底后, 两路径输出完全一致)
         let (s3, segs3, bigs3) = mk(vec![
             Stroke { start_price: 120.0, end_price: 110.0, start_bar: 0, end_bar: 2, is_up: false },
             Stroke { start_price: 110.0, end_price: 118.0, start_bar: 3, end_bar: 5, is_up: true },
@@ -1845,27 +1842,27 @@ mod tests {
         assert_eq!(sup3, big3, "场景3(首段向下兜底) 两路径不一致: sup3={:?} big3={:?}", sup3, big3);
         assert_eq!(sup3, vec![(0usize, 0usize, false), (1usize, 2usize, true), (3usize, 4usize, false)], "sup3={:?}", sup3);
     }
-    // ===== 笔Case4 (2026-09-05 用户定版: 直接映射线段Case4, 不参考任何mq4) =====
+    // ===== 笔Case4 (直接映射线段Case4) =====
     fn fx(price: f64, is_top: bool, idx: usize) -> Fractal {
         Fractal { price, is_top, bar_index: idx, merged_index: idx, time: idx }
     }
 
     #[test]
     fn test_stroke_first_reverse_initial_data_entry() {
-        // 2026-09-06 用户定版 (初始数据入口·链头前置反向笔): 窗口起点滑动区首个反向
+        // (初始数据入口·链头前置反向笔): 窗口起点滑动区首个反向
         // (顶/底) 分型满足分型+笔条件 (C1) 即可成为第一笔起点 — 无需其前存在可成笔的
-        // 前导分型. 模拟 XAUUSD M30 2024-02-22 案例: 底3(2028.51) 与顶4(2031.22) 相邻过近
-        // 不成笔 → 同向底序列一路新低至底20(2019.66) → 顶34 成笔.
-        // 旧行为: 链 = [底20, 顶34, ...] (第一笔向上, 下跌段不画);
-        // 新行为: 链头前置 (顶4→底20) 向下第一笔, 后续链逐位不变.
+        // 前导分型. 模拟: 起点底分型与首个顶分型相邻过近不成笔,
+        // 同向底序列一路新低, 其后的顶分型才成笔.
+        // 旧行为: 链 = [低底, 顶, ...] (第一笔向上, 下跌段不画);
+        // 新行为: 链头前置 (顶→低底) 向下第一笔, 后续链逐位不变.
         let v = vec![
             fx(2028.51, false, 3),  // 窗口起点底分型 (滑动区, 被同向替换吸收)
-            fx(2031.22, true, 4),   // 第一个顶分型 (18:00) → 新链起点
+            fx(2031.22, true, 4),   // 首个顶分型 → 新链起点
             fx(2027.30, false, 6),
             fx(2029.91, true, 9),
             fx(2019.78, false, 17),
             fx(2024.72, true, 19),
-            fx(2019.66, false, 20), // 同向底极值 (延伸终点 02:00, 原链起点)
+            fx(2019.66, false, 20), // 同向底极值 (原链起点)
             fx(2027.46, true, 34),  // 原第一笔终点
         ];
         let out = process_strokes_fractals(&v, true, 4);
@@ -1998,7 +1995,7 @@ mod tests {
     #[test]
     fn test_stroke_case4_param_off_keeps_old_chain() {
         // 参数化回归: case4 关闭 → 与历史行为一致 (C2 收于 T3(98), T4(99) 顶替换 → [B0,T4]),
-        // 即 2026-09-05 笔Case4 升格前旧链 (90→99 单笔, 100 高点被吞)
+        // 即笔Case4 升格前旧链 (90→99 单笔, 100 高点被吞)
         let v = vec![
             fx(90.0, false, 0), fx(100.0, true, 1), fx(94.0, false, 2), fx(97.0, true, 3),
             fx(93.0, false, 4), fx(98.0, true, 5), fx(94.0, false, 6), fx(99.0, true, 7),
@@ -2030,7 +2027,7 @@ mod tests {
 
     #[test]
     fn test_stroke_cases_param_mapping() {
-        // 用户参数值 0/3/4/5 → 开关映射; 旧值 34 兼容; 未知值按全开
+        // 参数值 0/3/4/5 → 开关映射; 旧值 34 兼容; 未知值按全开
         assert_eq!(StrokeCases::from_param(0), StrokeCases { case3: true, case4: true });
         assert_eq!(StrokeCases::from_param(3), StrokeCases { case3: false, case4: true });
         assert_eq!(StrokeCases::from_param(4), StrokeCases { case3: true, case4: false });
@@ -2041,7 +2038,7 @@ mod tests {
 
     #[test]
     fn test_levels_case4_off_segment() {
-        // 统一 levels 关 case4 (2026-09-05): 单笔A(100→120) 含后续(下+上)段对 → 全开时
+        // 统一 levels 关 case4: 单笔A(100→120) 含后续(下+上)段对 → 全开时
         // C4 单笔段 [0,0] 以最早终点胜出; 关 case4 → 走 C2 延伸段 [0,6] (历史行为)
         let strokes = vec![
             Stroke { start_price: 100.0, end_price: 120.0, start_bar: 0, end_bar: 2, is_up: true },
@@ -2060,7 +2057,7 @@ mod tests {
 
     #[test]
     fn test_levels_case3_off_segment() {
-        // 统一 levels 关 case3 (2026-09-05): down(112→98) 跌破前 up C2 段起点 100 → 全开时
+        // 统一 levels 关 case3: down(112→98) 跌破前 up C2 段起点 100 → 全开时
         // C3 一笔当线段 [3,3]; 关 case3 → 无 C3 → 段链止于 up C2 [0,2]
         let strokes = vec![
             Stroke { start_price: 100.0, end_price: 110.0, start_bar: 0, end_bar: 2, is_up: true },

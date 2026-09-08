@@ -36,7 +36,7 @@ unsafe fn read_f64s(ptr: *const f64, len: usize) -> Vec<f64> {
 }
 
 // ── 线程本地管线缓存 (每线程独立, 消除 EA 多线程竞态) ──
-// Rc 共享 (2026-08-20 对齐 flowsurface P3): 命中/存缓存/getter 读取均免 from_parts 9 Vec 克隆
+// Rc 共享: 命中/存缓存/getter 读取均免 from_parts 9 Vec 克隆
 thread_local! {
     static TL_PIPELINE: RefCell<Option<(Vec<f64>, Vec<f64>, usize, Rc<ChanlunPipeline>)>> = RefCell::new(None);
     static TL_RATES_TOTAL: RefCell<usize> = RefCell::new(0);
@@ -48,11 +48,11 @@ thread_local! {
 // ── 独立标记/中枢缓存 (单线程, 零锁) ──
 static mut MARKERS_COMPUTED: bool = false;
 static mut MARKERS_CACHE: Vec<(usize, u8, f64)> = Vec::new(); // (bar_index, kind, price) kind: 0=二买 1=二卖 2=三买 3=三卖
-// ── 大段中枢矩形缓存 (2026-08-11 对齐 GUI kline.rs L1377-1410: 矩形 + ZG/ZD 上下沿) ──
+// ── 大段中枢矩形缓存 (矩形 + ZG/ZD 上下沿) ──
 static mut ZHONGSHUS_COMPUTED: bool = false;
 static mut ZHONGSHUS_CACHE: Vec<(usize, usize, f64, f64)> = Vec::new(); // (start_bar, end_bar, zg, zd)
 
-/// 计算/命中管线 — 返回 Rc 共享引用 (对齐 flowsurface P3: 免 from_parts 9 Vec 克隆)
+/// 计算/命中管线 — 返回 Rc 共享引用 (免 from_parts 9 Vec 克隆)
 fn get_pipeline(highs: Vec<f64>, lows: Vec<f64>) -> Rc<ChanlunPipeline> {
     let n = highs.len();
     let pipeline = TL_PIPELINE.with(|cell| {
@@ -80,7 +80,7 @@ fn get_pipeline(highs: Vec<f64>, lows: Vec<f64>) -> Rc<ChanlunPipeline> {
     pipeline.unwrap()
 }
 
-/// 从缓存读取已计算的管线 (Rc 引用, 不触发重算/克隆; 对齐 flowsurface P3)
+/// 从缓存读取已计算的管线 (Rc 引用, 不触发重算/克隆)
 fn get_cached_pipeline() -> Option<Rc<ChanlunPipeline>> {
     TL_PIPELINE.with(|cell| {
         cell.borrow().as_ref().map(|(_, _, _, p)| Rc::clone(p))
@@ -94,7 +94,7 @@ fn get_cached_rates_total() -> usize {
 
 // ── 辅助函数 ──
 
-/// 构建买卖点标记输入链 (社区版: 中枢 → 二买二卖 → 三买三卖 → 2+N买/卖 → 中阴撤回过滤)
+/// 构建买卖点标记输入链 (中枢 → 二买二卖 → 三买三卖 → 2+N买/卖 → 撤回过滤)
 /// 返回 (second_markers, third_markers), 供 chanlun_markers_compute 渲染
 fn build_markers(
     sups: &[(usize, usize, bool)],
@@ -108,7 +108,7 @@ fn build_markers(
     Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>,
 ) {
     let zs = chanlun_lean_lib::zhongshu::detect_bigseg_zhongshus(sups, bigs, segs, strokes);
-    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数, GUI 两函数合并)
+    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数)
     let mut sm = chanlun_lean_lib::detect_second_buy_markers(strokes, segs, bigs, sups);
     sm.extend(chanlun_lean_lib::detect_second_sell_markers(strokes, segs, bigs, sups));
     let tm = chanlun_lean_lib::zhongshu::detect_bigseg_third_marks(sups, bigs, segs, strokes, &zs, highs, lows);
@@ -117,7 +117,7 @@ fn build_markers(
     let (buc1, ub) = guidao::calc_bigseg_upper_band_case1(bigs, segs, strokes);
     let mut pm = guidao::detect_bigseg_cf_buy_markers(sups, bigs, segs, strokes, &blc1, &db, &ub);
     pm.extend(guidao::detect_bigseg_cf_sell_markers(sups, bigs, segs, strokes, &buc1, &ub, &db));
-    // 中阴撤回过滤: 标记输出=过滤后标记
+    // 撤回过滤: 标记输出=过滤后标记
     let rf = guidao::apply_sup_retreat_filter(sups, bigs, segs, strokes, sm, tm, pm);
     (rf.second_markers, rf.third_markers)
 }
@@ -274,8 +274,8 @@ pub unsafe extern "system" fn chanlun_markers_get(index: c_int, bar: *mut c_int,
     0.0
 }
 
-/// 大段中枢缓存计算 (独立懒计算, 对齐 GUI chanlun.rs L216 渲染数据源)
-/// 区间 = 判定对锁定 ZG/ZD, 仅画矩形边框 (gg/dd 存数据不画, 同 GUI kline.rs L43-46)
+/// 大段中枢缓存计算 (独立懒计算)
+/// 区间 = 判定对锁定 ZG/ZD, 仅画矩形边框 (gg/dd 存数据不画)
 fn ensure_zhongshus_computed() {
     unsafe {
         if ZHONGSHUS_COMPUTED { return; }
@@ -883,7 +883,7 @@ mod tests {
         eprintln!("\n✓ E2E fractal pipeline self-check PASSED");
     }
 
-    /// 参数化: chanlun_set_cases 写入 TL_CASES 并清 TL_PIPELINE (2026-09-05)
+    /// 参数化: chanlun_set_cases 写入 TL_CASES 并清 TL_PIPELINE
     #[test]
     fn test_set_cases_invalidates_pipeline() {
         unsafe {

@@ -1,6 +1,6 @@
 //! 笔轨道 (Stroke Band) + 线段轨道 (Segment Band) + 大段轨道 (Big Segment Band)
-//! 从 Flowsurface chanlun_guidao.rs 下沉至基础库, feature = "guidao" 控制编译.
-//! 2026-07-03: 全部三级轨道 (笔+线段+大段) Case1-4 + 追踪已迁移.
+//! 自应用层下沉至基础库, feature = "guidao" 控制编译.
+//! 全部三级轨道 (笔+线段+大段) Case1-4 + 追踪.
 
 use crate::{Fractal, MergedCandle, Stroke, process_merged_candles, resolve_sup_end_point, SecondMarker};
 use crate::zhongshu::BigSegThirdMarker;
@@ -21,7 +21,6 @@ pub struct StrokeForTracking {
 }
 
 /// Turn signal detected from segment Case2 analysis.
-/// Reference: daduan_guidao_case1234-备份.py detect_turn_signals() L1134-1230
 #[derive(Debug, Clone)]
 pub struct TurnSignal {
     /// First stroke index of the Case2 segment (the stroke that triggered Case2).
@@ -337,8 +336,8 @@ pub fn detect_turn_signals(
     // 转空 = 向下笔经 Case3 升格为向下线段 (触发笔终点价 < 回溯基准向上笔起点价),
     // 转多 = 向上笔经 Case3 升格为向上线段 (对称).
     // 基准笔 = 回溯最近的 Case2-ok 笔或 C3 段起点笔, 不必是线段起点
-    // (8/7 案例: 1554 基准=1551 非段起点; 8/19 案例: 1471 基准=1468=seg[300] 起点).
-    // 8/10 案例: 1582 经防线2 阻断 (基准 1581 的 C2 段终点 1587 >= 1582) → 无事件 → 无转空.
+    // (基准笔既可为线段起点, 也可为段内部笔).
+    // 守卫: 基准的 C2 段须完整结束于触发笔开始之前, 否则无事件 → 无转空.
     let events = crate::collect_segment_case3_events(strokes);
     let mut turn_signals: Vec<TurnSignal> = Vec::new();
 
@@ -376,7 +375,7 @@ pub fn detect_turn_signals(
 /// 唯一性判定 (与"一笔当线段"Case3 升格同构, 零独立比价):
 /// 转空信号 (触发笔 j) 之后, 状态机紧邻升格 j+1 为反向线段 (j+1 是下一个 Case3 事件
 /// 且方向相反) ⟺ V多; 转多信号 j 之后 j+1 紧邻升格为向下线段 ⟺ V空.
-/// 8/10 案例: 转多 j=1589 后 1590 未升格 (seg[1589..1599] 一路向上) → 无 V空.
+/// 实例: 转多 j 后 j+1 未反向升格 (其后一路向上) → 无 V空.
 pub fn detect_v_signals(
     turn_signals: &[TurnSignal],
     strokes: &[Stroke],
@@ -511,10 +510,10 @@ pub fn calc_lower_band_case4(
 
 // ===== 入口: 笔轨道 =====
 
-/// 轨道级通用: 抬升/下压点落点重定位到分型确认 bar (2026-08-25 用户定版, 笔/线段/大段三级轨道).
+/// 轨道级通用: 抬升/下压点落点重定位到分型确认 bar (笔/线段/大段三级轨道).
 ///
 /// tracking 抬升点 bar_index = 轨点(分型高点) bar, 延伸线在当根接顶 -> 突破检测自指失效
-/// (美日 8/24 22:16 a+ 场景: 抬升点 19926 使 159.180 > 159.180 = false).
+/// (边界案例: 抬升点与确认 bar 同价时不抬升).
 /// 改为分型独立算法的确认 bar: identify_fractals 右往左扫描
 /// (right=merged[i] / mid=merged[i+1] / left=merged[i+2]), Fractal.merged_index = i+1 = mid 序号,
 /// 分型在 left (最晚合并K线) 出现时确认 -> confirm_bar = merged[merged_index+1] 的
@@ -601,7 +600,7 @@ pub fn compute_stroke_bands(
     upper_raw.extend(upper_c4);
     upper_raw.sort_by_key(|p| p.bar_index);
     let upper_band = apply_tracking(&upper_raw, &up_strokes, true);
-    // 2026-08-25 用户定版: 笔轨道抬升/下压点落点 = 分型确认 bar (延伸线不接顶/不触底语义; 笔上下轨, 线段/大段不镜像)
+    // 笔轨道抬升/下压点落点 = 分型确认 bar (延伸线不接顶/不触底语义; 笔上下轨, 线段/大段不镜像)
     let merged = process_merged_candles(highs, lows);
     let upper_band = relocate_band_lift_points(upper_band, &upper_raw, &merged, final_fractals, true);
 
@@ -947,7 +946,7 @@ pub fn compute_segment_bands(
     let mut lower_raw = seg_lower_c1; lower_raw.extend(seg_lower_c2); lower_raw.extend(seg_lower_c3); lower_raw.extend(seg_lower_c4);
     lower_raw.sort_by_key(|p| p.bar_index);
     let lower_band = apply_tracking(&lower_raw, &seg_down, false);
-    // 2026-08-25 用户定版: 线段轨道抬升/下压点落点 = 分型确认 bar (镜像笔轨道)
+    // 线段轨道抬升/下压点落点 = 分型确认 bar (镜像笔轨道)
     let merged = process_merged_candles(highs, lows);
     let upper_band = relocate_band_lift_points(upper_band, &upper_raw, &merged, final_fractals, true);
     let lower_band = relocate_band_lift_points(lower_band, &lower_raw, &merged, final_fractals, false);
@@ -955,8 +954,6 @@ pub fn compute_segment_bands(
 }
 
 // ===== 大段轨道 (Big Segment Band) =====
-// 对齐 chanlun_guidao.rs L1160-1780
-// 2026-07-03: 从 app 代码下沉至基础库
 
 /// Big-segment turn signal (大段转多/转空).
 #[derive(Debug, Clone)]
@@ -1320,7 +1317,7 @@ pub fn compute_bigseg_bands(
     let mut lower_raw = bigseg_lower_c1; lower_raw.extend(bigseg_lower_c2); lower_raw.extend(bigseg_lower_c3); lower_raw.extend(bigseg_lower_c4);
     lower_raw.sort_by_key(|p| p.bar_index);
     let lower_band = apply_tracking(&lower_raw, &bigseg_down, false);
-    // 2026-08-25 用户定版: 大段轨道抬升/下压点落点 = 分型确认 bar (镜像笔/线段轨道)
+    // 大段轨道抬升/下压点落点 = 分型确认 bar (镜像笔/线段轨道)
     let merged = process_merged_candles(highs, lows);
     let upper_band = relocate_band_lift_points(upper_band, &upper_raw, &merged, final_fractals, true);
     let lower_band = relocate_band_lift_points(lower_band, &lower_raw, &merged, final_fractals, false);
@@ -1328,8 +1325,6 @@ pub fn compute_bigseg_bands(
 }
 
 // ===== 轨道突破/跌破检测 =====
-// 对齐 chanlun_guidao.rs L52-59, L459-510, L1780-1928
-// 2026-07-03: 从 app 代码下沉至基础库
 
 /// Find the third downward segment bar_index for a given Case1 BandPoint.
 pub fn find_case1_third_seg_bar(bp: &BandPoint, seg_down: &[StrokeForTracking]) -> usize {
@@ -1414,7 +1409,7 @@ pub fn detect_bigseg_cf_buy_markers(
         };
         if c_price > f_price {
             markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
-            // 2+N 递推 (2026-08-15 用户定义): 参考高点 = min(U1, U2) 固定;
+            // 递推: 参考高点 = min(U1, U2) 固定;
             // 新向下高级段终点 bar 为界; 满足 min(U1,U2) > X > 高级段终点价 → 依次标记 2+2, 2+3, ...
             let second_up = up_big.iter().filter(|s| s.bar_index > dbe).nth(1);
             let ref_high = second_up.map(|s| c_price.min(s.high));
@@ -1479,7 +1474,7 @@ pub fn detect_bigseg_cf_sell_markers(
         };
         if c_price < f_price {
             markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
-            // 2+N 递推 (镜像): 参考低点 = max(C', C'+1) 固定;
+            // 递推 (镜像): 参考低点 = max(C', C'+1) 固定;
             // 新向上高级段终点 bar 为界; 满足 max(C',C'+1) < X < 高级段终点价 → 依次标记 2+2, 2+3, ...
             let second_down = down_big.iter().filter(|s| s.bar_index > ube).nth(1);
             let ref_low = second_down.map(|s| c_price.max(s.low));
@@ -1502,7 +1497,7 @@ pub fn detect_bigseg_cf_sell_markers(
     markers
 }
 
-/// 买/卖点撤回过滤器结果 (2026-08-15 用户定义)
+/// 买/卖点撤回过滤器结果
 pub struct RetreatFilterResult {
     pub second_markers: Vec<SecondMarker>,
     pub third_markers: Vec<BigSegThirdMarker>,
@@ -1525,19 +1520,19 @@ fn sup_range(
     Some((start_bar, end_bar))
 }
 
-/// 买/卖点撤回过滤器 (2026-08-15 用户定义, "∨"结构):
+/// 买/卖点撤回过滤器 ("∨"结构):
 /// 每个向下高级段成立 → 所有买点(二买/2+N买/三买)撤回到其前驱向上高级段内
 /// 最后一个买点 (bar 最大; X 及之前的保留, 之后的删除; 区间内无买点 → 撤回范围内全删);
 /// 每个向上高级段成立 → 卖点完全镜像 (撤回到前驱向下高级段内最后一个卖点).
 /// ⚠ 事件时序: 撤回只删除 bar ≤ 触发高级段自身终点bar 的标记, 其后区间内的标记
 /// (成立后才产生) 保留 — 避免误删最新结构内买点.
-/// ⚠ 逐事件 (2026-08-15 BUG 修复): 所有成立事件按序应用 (非只最后一个);
+/// ⚠ 逐事件: 所有成立事件按序应用 (非只最后一个);
 /// 区间内无买点时仅删除前驱区间终点之后、触发段自身终点之前的标记,
-/// 更早区间的标记不受本次撤回影响 (美日5分: 二买/三买被误删的根因).
-/// ⚠ cut 恒 = 触发高级段自身终点bar (2026-08-16 中阴修复): 事件时序 — 只撤回
-/// 该段成立时已存在的标记; 其后的中阴阶段 (反向高级段未成立且未创新低) 标记成立
-/// 更晚, 不撤回. 删除 "最后高级段 → cut=MAX" 特例 (美原油74.43中阴: 最后向下高级段
-/// 前驱区间无买点时, cut=MAX 把中阴阶段二买/2+1买全量误删).
+/// 更早区间的标记不受本次撤回影响.
+/// ⚠ cut 恒 = 触发高级段自身终点bar: 事件时序 — 只撤回
+/// 该段成立时已存在的标记; 其后反向段未成立且未创新低阶段内的标记成立
+/// 更晚, 不撤回. 删除 "最后高级段 → cut=MAX" 特例
+/// (该特例会把未确认阶段内二买/2+1买全量误删).
 pub fn apply_sup_retreat_filter(
     sups: &[(usize, usize, bool)],
     bigs: &[(usize, usize, bool)],
@@ -1555,7 +1550,7 @@ pub fn apply_sup_retreat_filter(
             for m in third_markers.iter().filter(|m| m.is_buy) { buy_bars.push(m.bar_index); }
             for m in plus_markers.iter().filter(|m| m.is_buy) { buy_bars.push(m.bar_index); }
             // cut: 触发高级段自身终点bar — 事件时序, 只撤回该段成立时已存在的买点;
-            // 其后区间 (含中阴阶段) 的买点成立更晚, 不撤回 (2026-08-16 中阴修复)
+            // 其后区间 (未确认阶段) 的买点成立更晚, 不撤回
             let cut = sup_range(sups[d_idx], bigs, segs, strokes).map(|(_, e)| e).unwrap_or(usize::MAX);
             match buy_bars.into_iter().filter(|&b| sb <= b && b <= eb).max() {
                 Some(x) => {
@@ -2009,7 +2004,7 @@ mod tests {
     /// 多高级段叠加: sups=[D1,U1,D2,U2], 买点撤回到 U1 区间内最后买点(46);
     /// 卖点逐事件: U1 成立 → D1 区间内无卖点 → 撤回范围内 2+1卖(46, U1 终点前) 删除;
     /// U2 成立 → 撤回到 D2 区间[52,70]内最后卖点(58), 删 (58, U2终点64] 内卖点;
-    /// 二卖(80>64) 属中阴阶段 (U2 后反向向下高级段未成立) 保留 (2026-08-16 中阴修复) — 买卖独立互不干扰.
+    /// 二卖(80>64) 属 U2 后反向向下高级段未成立阶段, 保留 — 买卖独立互不干扰.
     #[test]
     fn test_retreat_multi_sup_independent() {
         let (strokes, bigs) = retreat_test_strokes();
@@ -2032,13 +2027,13 @@ mod tests {
         assert_eq!(r.second_markers.len(), 3, "{:?}", r.second_markers);
         assert_eq!(r.second_markers[0].bar_index, 34); // 二买保留
         assert_eq!(r.second_markers[1].bar_index, 58); // 二卖(58≤58)保留
-        assert_eq!(r.second_markers[2].bar_index, 80); // 二卖(80>U2终点64) 中阴阶段保留
+        assert_eq!(r.second_markers[2].bar_index, 80); // 二卖(80>U2终点64) 未确认阶段保留
         // 卖点: U1 成立事件 D1 区间无卖点 → 2+1卖(46, 撤回范围内) 删除; U2 事件 X'=58, 删 (58,64]
         assert_eq!(r.plus_markers.len(), 1, "{:?}", r.plus_markers);
         assert_eq!(r.plus_markers[0], SecondPlusOneMarker { bar_index: 46, price: 103.0, is_buy: true, order: 1 });
     }
 
-    /// 回归 (2026-08-15 美日5分 BUG): 数据末尾是向上高级段 U_last (rposition 找到的 D2 在 U_last 之前),
+    /// 回归: 数据末尾是向上高级段 U_last (rposition 找到的 D2 在 U_last 之前),
     /// D2 早已成立, 其撤回不得删除 U_last 区间内买点 (二买/2+1/2+2, 事件时序) 及 U_last 终点bar后
     /// 未构成高级段的向下大段 X3 (2+3); cut = D2 终点bar, bar>cut 的买点全部保留.
     #[test]
@@ -2073,7 +2068,7 @@ fn test_retreat_buy_keep_markers_after_last_down_sup() {
         assert!(r.plus_markers.iter().all(|m| m.bar_index != 58));
     }
 
-    /// 回归 (2026-08-15 美日5分 BUG): D_last 前驱向上高级段区间内无买点 → 撤回范围内
+    /// 回归: D_last 前驱向上高级段区间内无买点 → 撤回范围内
     /// (前驱区间终点之后..cut) 全删, 更早区间内的二买/三买不受本次撤回影响 (保留).
     #[test]
     fn test_retreat_empty_region_keeps_earlier_markers() {
@@ -2100,7 +2095,7 @@ fn test_retreat_buy_keep_markers_after_last_down_sup() {
         assert!(r.plus_markers.is_empty(), "{:?}", r.plus_markers);
     }
 
-    /// 回归 (2026-08-15 逐事件修复): 多个向下高级段依次成立, 每次成立都触发撤回 —
+    /// 回归: 多个向下高级段依次成立, 每次成立都触发撤回 —
     /// D2 成立撤回 U1 区间 (删 X1 之后..D2 终点), D4 成立再撤回 U3 区间 (删 X3 之后..D4 终点);
     /// 中间 D 区间内的 2+N 标记不留存.
     #[test]
@@ -2133,20 +2128,20 @@ fn test_retreat_buy_keep_markers_after_last_down_sup() {
         assert_eq!(r.plus_markers[0], SecondPlusOneMarker { bar_index: 46, price: 103.0, is_buy: true, order: 1 });
     }
 
-    /// 中阴修复 (2026-08-16 美原油74.43): 最后向下高级段 D_last 成立后, 反向向上高级段未成立
-    /// 且未创新低 (中阴阶段) — D_last 终点bar 之后符合条件的买点必须保留.
-    /// 前驱 U1 区间内无买点 → 撤回范围仅 (U1终点, D_last终点], bar>D_last 终点的中阴买点保留;
-    /// 旧实现 cut=MAX 把中阴买点全量误删.
+    /// 最后向下高级段 D_last 成立后, 反向向上高级段未成立且未创新低 —
+    /// D_last 终点bar 之后符合条件的买点必须保留.
+    /// 前驱 U1 区间内无买点 → 撤回范围仅 (U1终点, D_last终点], bar>D_last 终点的买点保留;
+    /// 旧实现 cut=MAX 会误删这些买点.
     #[test]
-    fn test_retreat_buy_keep_zhongyin_markers_after_last_down_sup() {
+    fn test_retreat_buy_keep_unconfirmed_after_last_down_sup() {
         let (strokes, bigs) = retreat_test_strokes();
         let segs: Vec<(usize, usize, bool)> = strokes.iter().enumerate().map(|(i, s)| (i, i, s.is_up)).collect();
         let sups: Vec<(usize, usize, bool)> = vec![(0, 1, false), (2, 8, true), (9, 11, false)];
         // D_last 区间[52,70]内 2+2买(58)/2+3买(70) → 撤回范围内删除;
-        // D_last 终点bar 70 之后的中阴买点: 二买(76)/2+1买(78) → 保留
+        // D_last 终点bar 70 之后的买点: 二买(76)/2+1买(78) → 保留
         let second = vec![
             SecondMarker { bar_index: 8, price: 109.0, is_buy: true },  // 更早 D1 区间 → 保留
-            SecondMarker { bar_index: 76, price: 104.0, is_buy: true }, // 中阴 → 保留
+            SecondMarker { bar_index: 76, price: 104.0, is_buy: true },  // 未确认阶段 → 保留
         ];
         let third = vec![
             BigSegThirdMarker { bar_index: 9, price: 110.0, is_buy: true }, // 更早 D1 区间 → 保留
@@ -2154,7 +2149,7 @@ fn test_retreat_buy_keep_markers_after_last_down_sup() {
         let plus = vec![
             SecondPlusOneMarker { bar_index: 58, price: 102.0, is_buy: true, order: 2 }, // D_last 区间 → 删除
             SecondPlusOneMarker { bar_index: 70, price: 104.0, is_buy: true, order: 3 }, // D_last 终点 → 删除
-            SecondPlusOneMarker { bar_index: 78, price: 105.0, is_buy: true, order: 1 }, // 中阴 → 保留
+            SecondPlusOneMarker { bar_index: 78, price: 105.0, is_buy: true, order: 1 }, // 未确认阶段 → 保留
         ];
         let r = apply_sup_retreat_filter(&sups, &bigs, &segs, &strokes, second, third, plus);
         assert_eq!(r.second_markers.len(), 2, "{:?}", r.second_markers);
@@ -2166,16 +2161,16 @@ fn test_retreat_buy_keep_markers_after_last_down_sup() {
         assert_eq!(r.plus_markers[0], SecondPlusOneMarker { bar_index: 78, price: 105.0, is_buy: true, order: 1 });
     }
 
-    /// 中阴修复镜像 (卖点): 最后向上高级段 U_last 成立后, 反向向下高级段未成立且未创新高 —
+    /// 镜像 (卖点): 最后向上高级段 U_last 成立后, 反向向下高级段未成立且未创新高 —
     /// U_last 终点bar 之后的卖点保留; 前驱 D1 区间内无卖点 → 撤回范围仅 (D1终点, U_last终点],
-    /// bar>U_last 终点的中阴卖点 (76/78) 保留.
+    /// bar>U_last 终点的卖点 (76/78) 保留.
     #[test]
-    fn test_retreat_sell_keep_zhongyin_markers_after_last_up_sup() {
+    fn test_retreat_sell_keep_markers_after_last_up_sup() {
         let (strokes, bigs) = retreat_test_strokes();
         let segs: Vec<(usize, usize, bool)> = strokes.iter().enumerate().map(|(i, s)| (i, i, s.is_up)).collect();
         let sups: Vec<(usize, usize, bool)> = vec![(0, 1, true), (2, 8, false), (9, 11, true)];
         // 前驱 D1 区间[10,52]内无卖点; U_last 区间[52,70]内 2+2卖(58)/2+3卖(70) → 删除;
-        // U_last 终点bar 70 之后的中阴卖点 (76/78) → 保留
+        // U_last 终点bar 70 之后的卖点 (76/78) → 保留
         let second = vec![SecondMarker { bar_index: 76, price: 110.0, is_buy: false }];
         let third: Vec<BigSegThirdMarker> = vec![];
         let plus = vec![
