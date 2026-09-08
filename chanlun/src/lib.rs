@@ -172,7 +172,159 @@ fn check_down_stroke_case2(fractal_arr: &[Fractal], count: usize, start_idx: usi
     (false, end_idx)
 }
 
+// ===== 笔Case4 (事后修正, 2026-09-05 用户定版: 直接映射线段Case4; 禁止参考任何mq4) =====
+// 线段Case4: 单笔A包含后续(反向Case2段 + 同向Case2段)段对 → A以"一笔当线段"升格为线段.
+// 笔Case4 同构映射: 候选笔 (last→current) 之后的分形序列若已自然形成完整"两笔结构"
+//   (先反向后同向的两段虚拟笔, 各自满足类似Case2的连续新低/新高收口条件),
+//   且两笔整体被 (last.price, current.price) 区间包含 (不破 last 价 / 不超 current 价)
+//   → 该候选笔事后修正, 以 current 升格落笔.
+// 分型层没有"已成笔"作输入 (笔正是本函数输出), 故以相邻分型对 (F_k, F_{k+1}) 为虚拟笔
+//   单位: 分型序列严格交替 → 虚拟笔方向交替, 与线段层笔序列同构.
+// 镜像对象 (lib.rs): check_up_segment_case4 / check_down_segment_case4 (线段层, 输入=已成笔).
+fn check_up_stroke_case4(valid: &[Fractal], i: usize, low_a: f64, high_a: f64) -> bool {
+    let n = valid.len();
+    if i + 2 >= n { return false; } // current 之后至少还需 2 个分型才有结构可查
+    // 阶段1: 找收口的反向(下行)两笔 — 镜像 check_down_segment_case2 于虚拟笔
+    let mut down_end: usize = usize::MAX; // 下行收口虚拟笔起点 (顶分型索引)
+    let mut up_start: usize = usize::MAX; // 上行收口虚拟笔起点 (底分型索引)
+    let mut up_end: usize = usize::MAX;
+    let mut k = i;
+    while k + 1 < n {
+        if down_end == usize::MAX {
+            if valid[k].is_top {
+                // 尝试以 k 为下行起点: 首个下行对 (F_k,F_{k+1}) 低点作基准, 后续下行对连续新低即收口
+                let first_high = valid[k].price;
+                let mut prev_low = valid[k + 1].price;
+                let mut t = k + 2;
+                let mut closed = false;
+                while t + 1 < n {
+                    if valid[t].is_top {
+                        let cur_high = valid[t].price;
+                        let cur_low = valid[t + 1].price;
+                        if cur_high >= first_high { break; } // 高顶回试起点 → 该起点作废, 换下一下行起点
+                        if cur_low < prev_low { down_end = t; closed = true; break; }
+                        prev_low = cur_low;
+                    }
+                    t += 2;
+                }
+                if closed { k = down_end; } // 镜像 i = end_i: 收口后从其之后继续扫描
+            }
+        } else if !valid[k].is_top {
+            // 阶段2: 找收口的同向(上行)两笔 — 镜像 check_up_segment_case2 于虚拟笔
+            let first_low = valid[k].price;
+            let mut prev_high = valid[k + 1].price;
+            let mut t = k + 2;
+            let mut closed = false;
+            while t + 1 < n {
+                if !valid[t].is_top {
+                    let cur_low = valid[t].price;
+                    let cur_high = valid[t + 1].price;
+                    if cur_low <= first_low { break; } // 低点破坏 → 该起点作废, 换下一个上行起点
+                    if cur_high > prev_high { up_start = k; up_end = t; closed = true; break; }
+                    prev_high = cur_high;
+                }
+                t += 2;
+            }
+            if closed { break; }
+        }
+        k += 1;
+    }
+    if down_end == usize::MAX || up_end == usize::MAX { return false; }
+    // 包含性窗口 (镜像 get_real_seg_end_price: 自 A 后继起, 含被跳过结构):
+    // 真实下探最低 = 窗口 [i, up_start) 内全部下行虚拟笔低点 (首对 (F_i,F_{i+1}) 低点为初值)
+    let mut real_low = valid[i + 1].price;
+    let mut j = i + 1;
+    while j < up_start && j + 1 < n {
+        if valid[j].is_top { real_low = real_low.min(valid[j + 1].price); }
+        j += 1;
+    }
+    if real_low <= low_a { return false; } // 不破 A 起点 (last 价) — 镜像严格 >
+    // 真实反弹最高 = 窗口 [i, up_end] 内全部上行虚拟笔高点
+    let mut real_high = valid[i + 1].price;
+    let mut j = i + 1;
+    while j <= up_end && j + 1 < n {
+        if !valid[j].is_top { real_high = real_high.max(valid[j + 1].price); }
+        j += 1;
+    }
+    if real_high > high_a { return false; } // 不超 A 终点 (current 价) — 镜像允许 =
+    true
+}
+
+fn check_down_stroke_case4(valid: &[Fractal], i: usize, high_a: f64, low_a: f64) -> bool {
+    let n = valid.len();
+    if i + 2 >= n { return false; }
+    // 阶段1: 找收口的反向(上行)两笔 — 镜像 check_up_segment_case2 于虚拟笔
+    let mut up_end: usize = usize::MAX; // 上行收口虚拟笔起点 (底分型索引)
+    let mut down_start: usize = usize::MAX; // 下行收口虚拟笔起点 (顶分型索引)
+    let mut down_end: usize = usize::MAX;
+    let mut k = i;
+    while k + 1 < n {
+        if up_end == usize::MAX {
+            if !valid[k].is_top {
+                let first_low = valid[k].price;
+                let mut prev_high = valid[k + 1].price;
+                let mut t = k + 2;
+                let mut closed = false;
+                while t + 1 < n {
+                    if !valid[t].is_top {
+                        let cur_low = valid[t].price;
+                        let cur_high = valid[t + 1].price;
+                        if cur_low <= first_low { break; }
+                        if cur_high > prev_high { up_end = t; closed = true; break; }
+                        prev_high = cur_high;
+                    }
+                    t += 2;
+                }
+                if closed { k = up_end; }
+            }
+        } else if valid[k].is_top {
+            // 阶段2: 找收口的同向(下行)两笔 — 镜像 check_down_segment_case2 于虚拟笔
+            let first_high = valid[k].price;
+            let mut prev_low = valid[k + 1].price;
+            let mut t = k + 2;
+            let mut closed = false;
+            while t + 1 < n {
+                if valid[t].is_top {
+                    let cur_high = valid[t].price;
+                    let cur_low = valid[t + 1].price;
+                    if cur_high >= first_high { break; }
+                    if cur_low < prev_low { down_start = k; down_end = t; closed = true; break; }
+                    prev_low = cur_low;
+                }
+                t += 2;
+            }
+            if closed { break; }
+        }
+        k += 1;
+    }
+    if up_end == usize::MAX || down_end == usize::MAX { return false; }
+    // 包含性窗口 (镜像 check_down_segment_case4 的 get_real_seg_end_price 调用):
+    // 真实反弹最高 = 窗口 [i, down_start) 内全部上行虚拟笔高点 (首对高点为初值)
+    let mut real_high = valid[i + 1].price;
+    let mut j = i + 1;
+    while j < down_start && j + 1 < n {
+        if !valid[j].is_top { real_high = real_high.max(valid[j + 1].price); }
+        j += 1;
+    }
+    if real_high >= high_a { return false; } // 反弹不破 A 起点 (last 价) — 镜像严格 <
+    // 真实下探最低 = 窗口 [i, down_end] 内全部下行虚拟笔低点
+    let mut real_low = valid[i + 1].price;
+    let mut j = i + 1;
+    while j <= down_end && j + 1 < n {
+        if valid[j].is_top { real_low = real_low.min(valid[j + 1].price); }
+        j += 1;
+    }
+    if real_low < low_a { return false; } // 下探不破 A 终点 (current 价) — 镜像允许 =
+    true
+}
 pub fn process_strokes_fractals(valid_fractals: &[Fractal], case3_enabled: bool, min_bars: usize) -> Vec<Fractal> {
+    process_strokes_fractals_with_cases(valid_fractals, case3_enabled, true, min_bars)
+}
+
+/// 笔构建完整实现 (2026-09-05 用户定版: 缠论共振指标参数化, case4 可开关).
+/// case3_enabled = C3 强势突破 + F1 修正开关; case4_enabled = C4 事后修正升格开关.
+/// process_strokes_fractals (3参) = case4 恒开的历史行为, 输出零变化.
+fn process_strokes_fractals_with_cases(valid_fractals: &[Fractal], case3_enabled: bool, case4_enabled: bool, min_bars: usize) -> Vec<Fractal> {
     let total = valid_fractals.len();
     if total < 1 { return vec![]; }
     let mut final_fractals: Vec<Fractal> = vec![valid_fractals[0].clone()];
@@ -256,15 +408,71 @@ pub fn process_strokes_fractals(valid_fractals: &[Fractal], case3_enabled: bool,
                 }
             }
 
+            // C4: 事后修正升格 (2026-09-05 用户定版, 直接映射线段Case4; case4_enabled 开关)
+            // 终点尚未被 C1/C3/F1 锁为 current 时 (含 C2 延伸至更劣终点/三路全败),
+            // 若 current 之后已自然形成完整两笔结构且整体包含于 (last.price, current.price)
+            // → 候选笔 (last→current) 事后升格, 以 current 落笔 (链从 current 之后继续).
+            if case4_enabled && !(valid && end_fractal_idx == i) {
+                let c4_ok = if is_up {
+                    check_up_stroke_case4(valid_fractals, i, last.price, current.price)
+                } else if is_down {
+                    check_down_stroke_case4(valid_fractals, i, last.price, current.price)
+                } else {
+                    false
+                };
+                if c4_ok {
+                    valid = true;
+                    next_i = i + 1;
+                    end_fractal_idx = i;
+                }
+            }
+
             if valid {
                 final_fractals.push(valid_fractals[end_fractal_idx].clone());
                 i = next_i;
             } else { i += 1; }
         }
     }
+
+    // ── 初始数据入口·链头前置反向笔 (2026-09-06 用户定版) ──
+    // 窗口起点滑动区 (final[0] 之前、被"隔位同向替换"吸收掉的分型) 内若存在与 final[0]
+    // 异向的极值分型 bm, 且 (bm → final[0]) 满足标准笔条件 (C1: bar 间隔 + merged 间隔
+    // + 区间无干扰), 则以 bm 为链起点前置插入 — 第一笔 = bm→final[0] (反向笔),
+    // 后续链逐位不变 (前置插入后原链各端点仍是交替序列, 输出与原链完全一致).
+    // 语义: 初始数据第一个反向(顶/底)分型满足分型+笔条件即可成为第一笔起点,
+    // 无需其前存在可成笔的前导分型 (用户案例: XAUUSD M30 顶2031.22@18:00 →
+    // 延伸底2019.66@次日02:00 画向下第一笔; 旧行为链起点绑定首分型同向族极值,
+    // 顶分型永远没有机会成为笔起点).
+    if final_fractals.len() >= 2 {
+        let a0 = &final_fractals[0];
+        if let Some(a0_idx) = valid_fractals
+            .iter()
+            .position(|f| f.bar_index == a0.bar_index && f.merged_index == a0.merged_index)
+        {
+            // 滑动区反向极值: valid[..a0_idx] 中与 a0 异向者取极值 (顶更高/底更低)
+            let mut bm: Option<&Fractal> = None;
+            for f in valid_fractals[..a0_idx].iter() {
+                if f.is_top != a0.is_top {
+                    let better = match bm {
+                        None => true,
+                        Some(cur) => if f.is_top { f.price > cur.price } else { f.price < cur.price },
+                    };
+                    if better { bm = Some(f); }
+                }
+            }
+            if let Some(bm) = bm {
+                let bar_diff = a0.bar_index.abs_diff(bm.bar_index);
+                if bar_diff >= min_bars {
+                    let mdiff = a0.merged_index.abs_diff(bm.merged_index);
+                    if mdiff > 1 && check_original_valid(valid_fractals, a0_idx, bm, a0) {
+                        final_fractals.insert(0, bm.clone());
+                    }
+                }
+            }
+        }
+    }
     final_fractals
 }
-
 pub fn build_strokes(final_fractals: &[Fractal]) -> Vec<Stroke> {
     let total = final_fractals.len();
     if total < 2 { return vec![]; }
@@ -465,12 +673,18 @@ fn check_down_segment_case4(strokes: &[Stroke], start_idx: usize) -> (bool, usiz
 
 pub fn process_segments(strokes: &[Stroke]) -> Vec<(usize, usize, bool)> {
     // 线段层: Case2/Case3/Case4 全部输出 (Case3 保留, 2026-08-19)
-    process_segments_with_case3(strokes, true)
+    process_segments_with_cases(strokes, true, true)
 }
 
-/// 内部: 段构建主逻辑 (线段/大段共用). enable_case3=true 时正常输出 Case3 候选
+/// 段构建主逻辑 (线段/大段共用). enable_case3=true 时正常输出 Case3 候选
 /// (2026-08-19 上午大段层曾临时隐藏 Case3 只输出 Case2/4, 验证 Case4 正确后恢复)
-fn process_segments_with_case3(strokes: &[Stroke], enable_case3: bool) -> Vec<(usize, usize, bool)> {
+/// 2026-09-05 用户定版: 统一参数化 — enable_case4=false 时关闭 Case4 事后修正候选
+/// (process_segments / process_segments_with_case3 旧签名为全开包装)
+pub fn process_segments_with_cases(
+    strokes: &[Stroke],
+    enable_case3: bool,
+    enable_case4: bool,
+) -> Vec<(usize, usize, bool)> {
     let count = strokes.len();
     if count < 2 { return vec![]; }
 
@@ -485,6 +699,10 @@ fn process_segments_with_case3(strokes: &[Stroke], enable_case3: bool) -> Vec<(u
     let mut c3_seg_starts: Vec<bool> = vec![false; count];
     let mut i: usize = 0;
     let mut looking_for_up = true;
+    // 2026-09-06 用户定版: 首段向下兜底 (同构高级段方案B) — 窗口起点若先出现向下笔
+    // (初始数据无前导向上结构), 该向下笔满足段条件 (C2/C3/C4) 也直接建成第一条向下线段,
+    // 不再以"隐含向上前提"跳过; 大段层经投影复用本函数自动继承 (process_big_segments L846).
+    let mut first = true;
 
     while i < count {
         let mut found = false;
@@ -502,8 +720,10 @@ fn process_segments_with_case3(strokes: &[Stroke], enable_case3: bool) -> Vec<(u
                 if ok_c3 { candidates.push(i); is_c3 = true; }
             }
             // Case4: post-hoc correction (contains down+up seg pair)
-            let (ok_c4, _) = check_up_segment_case4(strokes, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 {
+                let (ok_c4, _) = check_up_segment_case4(strokes, i);
+                if ok_c4 { candidates.push(i); }
+            }
 
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if !looking_for_up && !strokes[i].is_up {
@@ -517,16 +737,45 @@ fn process_segments_with_case3(strokes: &[Stroke], enable_case3: bool) -> Vec<(u
                 if ok_c3 { candidates.push(i); is_c3 = true; }
             }
             // Case4: post-hoc correction (contains up+down seg pair)
-            let (ok_c4, _) = check_down_segment_case4(strokes, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 {
+                let (ok_c4, _) = check_down_segment_case4(strokes, i);
+                if ok_c4 { candidates.push(i); }
+            }
+
+            if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
+        } else if first && !strokes[i].is_up {
+            // 首段向下兜底 (方案B 同构高级段): 尚未建立任何线段时, 向下笔
+            // Case2/Case3/Case4 成立也直接作为第一条线段 — 下跌行情/初始数据起点
+            // 处向上段条件永不成立时, 向下笔不再被跳过 (不再以向上段为隐含前提).
+            let mut candidates: Vec<usize> = Vec::new();
+            // Case2: consecutive lower-lows
+            let (ok_c2, end_i_c2) = seg_case2_cache[i];
+            if ok_c2 { candidates.push(end_i_c2); }
+            // Case3: break prev up-segment low (one-stroke segment, 首段兜底同样支持)
+            if enable_case3 {
+                let (ok_c3, _, _) = check_down_segment_case3(strokes, i, &seg_case2_cache, &c3_seg_starts);
+                if ok_c3 { candidates.push(i); is_c3 = true; }
+            }
+            // Case4: post-hoc correction (首段向下兜底同样支持, 三分支行为一致)
+            if enable_case4 {
+                let (ok_c4, _) = check_down_segment_case4(strokes, i);
+                if ok_c4 { candidates.push(i); }
+            }
 
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         }
 
         if found {
             if is_c3 && best_end == i { c3_seg_starts[i] = true; }
-            segments.push((i, best_end, looking_for_up)); i = best_end + 1; looking_for_up = !looking_for_up; }
-        else { i += 1; }
+            // 首段向下兜底建立: 不翻转 (保持 looking_for_up=true → 下一条必须是向上段),
+            // 后续向下笔被跳过并由端点延伸吸收进第一条, 保证整个下跌区间只生成一个向下线段
+            let first_seg_down = first && !strokes[i].is_up;
+            // 记录方向 = 实际笔方向 (首段向下时 looking_for_up 仍为 true, 不能用它记录)
+            segments.push((i, best_end, strokes[i].is_up));
+            i = best_end + 1;
+            if !first_seg_down { looking_for_up = !looking_for_up; }
+            first = false;
+        } else { i += 1; }
     }
 
     // Extend: update segment endpoint if later same-direction stroke makes new extreme
@@ -559,6 +808,16 @@ fn process_segments_with_case3(strokes: &[Stroke], enable_case3: bool) -> Vec<(u
 ///           其 C2 段 [1551..1553] 被消费但 seg_case2_cache 仍 ok → 回溯以它为基准.
 /// 算法零改动: 仅收集事件, 不影响 segments 构建.
 pub fn collect_segment_case3_events(strokes: &[Stroke]) -> Vec<(usize, usize, usize, bool)> {
+    collect_segment_case3_events_with_cases(strokes, true, true)
+}
+
+/// 线段 Case3 事件收集带统一 levels 参数版 (2026-09-05):
+/// enable_case3/4 必须与 process_segments_with_cases 同参, 保证事件与段结构一致.
+pub fn collect_segment_case3_events_with_cases(
+    strokes: &[Stroke],
+    enable_case3: bool,
+    enable_case4: bool,
+) -> Vec<(usize, usize, usize, bool)> {
     let count = strokes.len();
     if count < 2 { return vec![]; }
 
@@ -573,6 +832,9 @@ pub fn collect_segment_case3_events(strokes: &[Stroke]) -> Vec<(usize, usize, us
     let mut c3_seg_starts: Vec<bool> = vec![false; count];
     let mut i: usize = 0;
     let mut looking_for_up = true;
+    // 2026-09-06 用户定版: 与 process_segments_with_cases 首段向下兜底完全同步
+    // (事件收集必须与段构建同构, 否则轨道信号引用不存在的 C3 段 — 技能教训)
+    let mut first = true;
 
     while i < count {
         let mut found = false;
@@ -585,18 +847,28 @@ pub fn collect_segment_case3_events(strokes: &[Stroke]) -> Vec<(usize, usize, us
             let (ok_c2, end_i_c2) = seg_case2_cache[i];
             if ok_c2 { candidates.push(end_i_c2); }
             let (ok_c3, _, b) = check_up_segment_case3(strokes, i, &seg_case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
             let (ok_c4, _) = check_up_segment_case4(strokes, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if !looking_for_up && !strokes[i].is_up {
             let mut candidates: Vec<usize> = Vec::new();
             let (ok_c2, end_i_c2) = seg_case2_cache[i];
             if ok_c2 { candidates.push(end_i_c2); }
             let (ok_c3, _, b) = check_down_segment_case3(strokes, i, &seg_case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
             let (ok_c4, _) = check_down_segment_case4(strokes, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
+            if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
+        } else if first && !strokes[i].is_up {
+            // 首段向下兜底 (方案B): 与 process_segments_with_cases 首段分支完全一致
+            let mut candidates: Vec<usize> = Vec::new();
+            let (ok_c2, end_i_c2) = seg_case2_cache[i];
+            if ok_c2 { candidates.push(end_i_c2); }
+            let (ok_c3, _, b) = check_down_segment_case3(strokes, i, &seg_case2_cache, &c3_seg_starts);
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
+            let (ok_c4, _) = check_down_segment_case4(strokes, i);
+            if enable_case4 && ok_c4 { candidates.push(i); }
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         }
 
@@ -605,10 +877,16 @@ pub fn collect_segment_case3_events(strokes: &[Stroke]) -> Vec<(usize, usize, us
                 c3_seg_starts[i] = true;
                 // 基准段终点: C2-ok 基准笔 → 其 C2 段终点; C3 段起点基准笔 → 一笔当线段 [base..base]
                 let end_i = if seg_case2_cache[base_idx].0 { seg_case2_cache[base_idx].1 } else { base_idx };
-                events.push((i, base_idx, end_i, looking_for_up));
+                // 事件方向 = 实际笔方向 (首段向下时 looking_for_up 仍为 true, 不能用它记录)
+                events.push((i, base_idx, end_i, strokes[i].is_up));
             }
+            // 首段向下兜底建立: 不翻转 looking_for_up, 后续向下笔被跳过并由端点延伸吸收
+            let first_seg_down = first && !strokes[i].is_up;
             i = best_end + 1;
-            looking_for_up = !looking_for_up;
+            if !first_seg_down {
+                looking_for_up = !looking_for_up;
+            }
+            first = false;
         } else {
             i += 1;
         }
@@ -622,6 +900,16 @@ pub fn collect_segment_case3_events(strokes: &[Stroke]) -> Vec<(usize, usize, us
 /// 然后直接调用已验证的 process_segments 逻辑，零逻辑偏差。
 /// 2026-08-19: 验证 Case4 正确后恢复 Case3 正常输出 (线段/大段/高级段三分支一致).
 pub fn process_big_segments(strokes: &[Stroke], segs: &[(usize, usize, bool)]) -> Vec<(usize, usize, bool)> {
+    process_big_segments_with_cases(strokes, segs, true, true)
+}
+
+/// 大段 (投影法) 带统一 levels 参数版 (2026-09-05 用户定版: 与大段共用线段算法 C3/C4 门).
+pub fn process_big_segments_with_cases(
+    strokes: &[Stroke],
+    segs: &[(usize, usize, bool)],
+    enable_case3: bool,
+    enable_case4: bool,
+) -> Vec<(usize, usize, bool)> {
     if segs.len() < 2 { return vec![]; }
 
     // 投影: 每条线段→一个"虚拟线段"(Stroke 仅是实现载体)，is_up/起点价/终点价 经 线段→笔 索引解析
@@ -637,9 +925,7 @@ pub fn process_big_segments(strokes: &[Stroke], segs: &[(usize, usize, bool)]) -
         .collect();
 
     // 2026-08-19: 大段层恢复 Case3 正常输出 (Case2/3/4 全部输出)
-    let result = process_segments_with_case3(&projected, true);
-
-    result
+    process_segments_with_cases(&projected, enable_case3, enable_case4)
 }
 
 /// 高级段状态机 Case3 建段事件收集 (供 guidao.rs 大段轨道转空/转多信号对齐高级段 Case3).
@@ -654,6 +940,18 @@ pub fn collect_superior_case3_events(
     strokes: &[Stroke],
     segs: &[(usize, usize, bool)],
     bigs: &[(usize, usize, bool)],
+) -> Vec<(usize, usize, usize, bool)> {
+    collect_superior_case3_events_with_cases(strokes, segs, bigs, true, true)
+}
+
+/// 高级段 Case3 事件收集带统一 levels 参数版 (2026-09-05):
+/// enable_case3/4 必须与 process_superior_segments_with_cases 同参, 保证事件与段结构一致.
+pub fn collect_superior_case3_events_with_cases(
+    strokes: &[Stroke],
+    segs: &[(usize, usize, bool)],
+    bigs: &[(usize, usize, bool)],
+    enable_case3: bool,
+    enable_case4: bool,
 ) -> Vec<(usize, usize, usize, bool)> {
     if bigs.len() < 2 { return vec![]; }
 
@@ -700,18 +998,18 @@ pub fn collect_superior_case3_events(
             let (ok_c2, end_i_c2) = case2_cache[i];
             if ok_c2 { candidates.push(end_i_c2); }
             let (ok_c3, _, b) = check_up_segment_case3(&projected, i, &case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
             let (ok_c4, _) = check_up_segment_case4(&projected, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if !looking_for_up && !projected[i].is_up {
             let mut candidates: Vec<usize> = Vec::new();
             let (ok_c2, end_i_c2) = case2_cache[i];
             if ok_c2 { candidates.push(end_i_c2); }
             let (ok_c3, _, b) = check_down_segment_case3(&projected, i, &case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
             let (ok_c4, _) = check_down_segment_case4(&projected, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if first && !projected[i].is_up {
             // 首段向下兜底 (方案B): 与 process_superior_segments 主循环分支完全一致
@@ -719,9 +1017,9 @@ pub fn collect_superior_case3_events(
             let (ok_c2, end_i_c2) = case2_cache[i];
             if ok_c2 { candidates.push(end_i_c2); }
             let (ok_c3, _, b) = check_down_segment_case3(&projected, i, &case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; base_idx = b; }
             let (ok_c4, _) = check_down_segment_case4(&projected, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         }
 
@@ -757,6 +1055,18 @@ pub fn process_superior_segments(
     strokes: &[Stroke],
     segs: &[(usize, usize, bool)],
     bigs: &[(usize, usize, bool)],
+) -> Vec<(usize, usize, bool)> {
+    process_superior_segments_with_cases(strokes, segs, bigs, true, true)
+}
+
+/// 高级段 (投影法) 带统一 levels 参数版 (2026-09-05 用户定版: C3/C4 可关).
+/// 旧 3 参签名 = 全开包装, 行为与历史完全一致.
+pub fn process_superior_segments_with_cases(
+    strokes: &[Stroke],
+    segs: &[(usize, usize, bool)],
+    bigs: &[(usize, usize, bool)],
+    enable_case3: bool,
+    enable_case4: bool,
 ) -> Vec<(usize, usize, bool)> {
     if bigs.len() < 2 { return vec![]; }
 
@@ -808,10 +1118,10 @@ pub fn process_superior_segments(
             if ok_c2 { candidates.push(end_i_c2); }
             // Case3: break prev down-segment high (one-stroke segment)
             let (ok_c3, _, _) = check_up_segment_case3(&projected, i, &case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; }
             // Case4: post-hoc correction (contains down+up bigseg pair)
             let (ok_c4, _) = check_up_segment_case4(&projected, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
 
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if !looking_for_up && !projected[i].is_up {
@@ -821,10 +1131,10 @@ pub fn process_superior_segments(
             if ok_c2 { candidates.push(end_i_c2); }
             // Case3: break prev up-segment low (one-stroke segment)
             let (ok_c3, _, _) = check_down_segment_case3(&projected, i, &case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; }
             // Case4: post-hoc correction (contains up+down bigseg pair)
             let (ok_c4, _) = check_down_segment_case4(&projected, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
 
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         } else if first && !projected[i].is_up {
@@ -837,10 +1147,10 @@ pub fn process_superior_segments(
             if ok_c2 { candidates.push(end_i_c2); }
             // Case3: break prev up-segment low (one-stroke segment, 首段兜底同样支持)
             let (ok_c3, _, _) = check_down_segment_case3(&projected, i, &case2_cache, &c3_seg_starts);
-            if ok_c3 { candidates.push(i); is_c3 = true; }
+            if enable_case3 && ok_c3 { candidates.push(i); is_c3 = true; }
             // Case4: post-hoc correction (首段向下兜底同样支持, 三分支行为一致)
             let (ok_c4, _) = check_down_segment_case4(&projected, i);
-            if ok_c4 { candidates.push(i); }
+            if enable_case4 && ok_c4 { candidates.push(i); }
 
             if !candidates.is_empty() { candidates.sort(); best_end = candidates[0]; found = true; }
         }
@@ -1038,6 +1348,35 @@ pub fn detect_second_sell_markers(
 }
 
 // ===== 高层API: 一键全管线计算 =====
+// ===== 高层API: 一键全管线计算 =====
+/// 笔构建 Case 配置 (2026-09-05 用户定版: 缠论共振指标参数 0/3/4/5, 数字即被关闭的 case;
+/// 5=关case3+4 全关 (原 34, 2026-09-05 改值以利 TDX/MT4 应用; 旧值 34 兼容).
+/// 默认全开 = 与 ChanlunPipeline::new 完全一致的现行行为 (参数化零回归).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrokeCases {
+    pub case3: bool,
+    pub case4: bool,
+}
+
+impl Default for StrokeCases {
+    fn default() -> Self {
+        Self { case3: true, case4: true }
+    }
+}
+
+impl StrokeCases {
+    /// 用户参数值 → 开关: 0=全开, 3=关case3, 4=关case4, 5=关case34 (2026-09-05 由 34 改值);
+    /// 旧值 34 兼容映射全关; 未知值按全开.
+    pub fn from_param(v: u8) -> Self {
+        match v {
+            3 => Self { case3: false, case4: true },
+            4 => Self { case3: true, case4: false },
+            5 | 34 => Self { case3: false, case4: false },
+            _ => Self::default(),
+        }
+    }
+}
+
 pub struct ChanlunPipeline {
     pub highs: Vec<f64>,
     pub lows: Vec<f64>,
@@ -1052,14 +1391,32 @@ pub struct ChanlunPipeline {
 
 impl ChanlunPipeline {
     pub fn new(highs: Vec<f64>, lows: Vec<f64>) -> Self {
+        Self::new_with_cases(highs, lows, StrokeCases::default(), StrokeCases::default())
+    }
+
+    /// 带笔 Case 配置的管线入口 (2026-09-05 用户定版: 指标参数化).
+    /// new() 委托本函数且默认全开 → 历史行为零变化 (参数化零回归).
+    pub fn new_with_stroke_cases(highs: Vec<f64>, lows: Vec<f64>, cases: StrokeCases) -> Self {
+        Self::new_with_cases(highs, lows, cases, StrokeCases::default())
+    }
+
+    /// 全参数管线入口 (2026-09-05 用户定版: 线段/大段/高级段 共用统一 levels 开关):
+    /// stroke_cases = 笔 C3/C4 开关; levels_cases = 线段/大段/高级段统一 C3/C4 开关.
+    /// new()/new_with_stroke_cases 委托本函数且默认全开 → 历史行为零变化.
+    pub fn new_with_cases(
+        highs: Vec<f64>,
+        lows: Vec<f64>,
+        stroke_cases: StrokeCases,
+        levels_cases: StrokeCases,
+    ) -> Self {
         let merged = process_merged_candles(&highs, &lows);
         let points = identify_fractals(&merged);
         let valid = filter_fractals(&points);
-        let ff = process_strokes_fractals(&valid, true, 4);
+        let ff = process_strokes_fractals_with_cases(&valid, stroke_cases.case3, stroke_cases.case4, 4);
         let strokes = build_strokes(&ff);
-        let segs = process_segments(&strokes);
-        let bigs = process_big_segments(&strokes, &segs);
-        let sups = process_superior_segments(&strokes, &segs, &bigs);
+        let segs = process_segments_with_cases(&strokes, levels_cases.case3, levels_cases.case4);
+        let bigs = process_big_segments_with_cases(&strokes, &segs, levels_cases.case3, levels_cases.case4);
+        let sups = process_superior_segments_with_cases(&strokes, &segs, &bigs, levels_cases.case3, levels_cases.case4);
 
         Self { highs, lows, merged, valid_fractals: valid, final_fractals: ff, strokes, segments: segs, big_segments: bigs, superior_segments: sups }
     }
@@ -1408,10 +1765,12 @@ mod tests {
     #[test]
     fn test_case3_output_bigseg_and_superior() {
         // 2026-08-19 用户定版: 大段/高级段恢复 Case3 正常输出 (线段/大段/高级段三分支一致)
+        // 2026-09-06 用户定版: 线段/大段层同构首段向下兜底 (初始数据特殊情况) — 三层行为一致.
         // 序列: down(100→90) down(90→85) up(85→105)
-        // 线段层: up@2 突破前置 down Case2 段起点 100 → Case3 成立 → (2,2,true)
-        // 大段层: Case3 输出 → (2,2,true)
-        // 高级段层: 首段兜底 down@0→down@1 Case2 → (0,1,false); up@2 Case3 → (2,2,true)
+        // 线段层: 首段兜底 down@0→down@1 Case2 → (0,1,false); up@2 突破前置 down Case2 段起点 100
+        //         → Case3 成立 → (2,2,true)
+        // 大段层: 投影复用线段算法 → 同 (0,1,false),(2,2,true)
+        // 高级段层: 首段兜底同构 → (0,1,false),(2,2,true)
         let strokes = vec![
             Stroke { start_price: 100.0, end_price: 90.0, start_bar: 0, end_bar: 2, is_up: false },
             Stroke { start_price: 90.0, end_price: 85.0, start_bar: 3, end_bar: 5, is_up: false },
@@ -1420,13 +1779,13 @@ mod tests {
         let segs: Vec<(usize, usize, bool)> = vec![(0,0,false),(1,1,false),(2,2,true)];
         let bigs = segs.clone();
 
-        // 线段层: Case3 输出
+        // 线段层: 首段兜底 Case2 + Case3 输出
         let segs_out = process_segments(&strokes);
-        assert_eq!(segs_out, vec![(2usize, 2usize, true)], "segs_out={:?}", segs_out);
-        // 大段层: Case3 输出
+        assert_eq!(segs_out, vec![(0usize, 1usize, false), (2usize, 2usize, true)], "segs_out={:?}", segs_out);
+        // 大段层: 投影复用 → 同线段层
         let bigs_out = process_big_segments(&strokes, &segs);
-        assert_eq!(bigs_out, vec![(2usize, 2usize, true)], "bigs_out={:?}", bigs_out);
-        // 高级段层: 首段兜底 Case2 + Case3 输出
+        assert_eq!(bigs_out, vec![(0usize, 1usize, false), (2usize, 2usize, true)], "bigs_out={:?}", bigs_out);
+        // 高级段层: 首段兜底 Case2 + Case3 输出 (不变)
         let sups_out = process_superior_segments(&strokes, &segs, &bigs);
         assert_eq!(sups_out, vec![(0usize, 1usize, false), (2usize, 2usize, true)], "sups_out={:?}", sups_out);
     }
@@ -1473,7 +1832,7 @@ mod tests {
         let sup2 = process_superior_segments(&s2, &segs2, &bigs2);
         assert_eq!(sup2, big2, "场景2(向下Case4) 两路径不一致: sup2={:?} big2={:?}", sup2, big2);
 
-        // 场景3: 首段向下 (方案B 有意差异): 高级段多首段兜底, 后续段与大段层一致
+        // 场景3: 首段向下 (2026-09-06 大段层同构首段兜底后, 两路径输出完全一致)
         let (s3, segs3, bigs3) = mk(vec![
             Stroke { start_price: 120.0, end_price: 110.0, start_bar: 0, end_bar: 2, is_up: false },
             Stroke { start_price: 110.0, end_price: 118.0, start_bar: 3, end_bar: 5, is_up: true },
@@ -1483,7 +1842,236 @@ mod tests {
         ]);
         let big3 = process_big_segments(&s3, &segs3);
         let sup3 = process_superior_segments(&s3, &segs3, &bigs3);
+        assert_eq!(sup3, big3, "场景3(首段向下兜底) 两路径不一致: sup3={:?} big3={:?}", sup3, big3);
         assert_eq!(sup3, vec![(0usize, 0usize, false), (1usize, 2usize, true), (3usize, 4usize, false)], "sup3={:?}", sup3);
-        assert_eq!(&sup3[1..], &big3[..], "场景3 首段兜底外后续段不一致: sup3={:?} big3={:?}", sup3, big3);
     }
+    // ===== 笔Case4 (2026-09-05 用户定版: 直接映射线段Case4, 不参考任何mq4) =====
+    fn fx(price: f64, is_top: bool, idx: usize) -> Fractal {
+        Fractal { price, is_top, bar_index: idx, merged_index: idx, time: idx }
+    }
+
+    #[test]
+    fn test_stroke_first_reverse_initial_data_entry() {
+        // 2026-09-06 用户定版 (初始数据入口·链头前置反向笔): 窗口起点滑动区首个反向
+        // (顶/底) 分型满足分型+笔条件 (C1) 即可成为第一笔起点 — 无需其前存在可成笔的
+        // 前导分型. 模拟 XAUUSD M30 2024-02-22 案例: 底3(2028.51) 与顶4(2031.22) 相邻过近
+        // 不成笔 → 同向底序列一路新低至底20(2019.66) → 顶34 成笔.
+        // 旧行为: 链 = [底20, 顶34, ...] (第一笔向上, 下跌段不画);
+        // 新行为: 链头前置 (顶4→底20) 向下第一笔, 后续链逐位不变.
+        let v = vec![
+            fx(2028.51, false, 3),  // 窗口起点底分型 (滑动区, 被同向替换吸收)
+            fx(2031.22, true, 4),   // 第一个顶分型 (18:00) → 新链起点
+            fx(2027.30, false, 6),
+            fx(2029.91, true, 9),
+            fx(2019.78, false, 17),
+            fx(2024.72, true, 19),
+            fx(2019.66, false, 20), // 同向底极值 (延伸终点 02:00, 原链起点)
+            fx(2027.46, true, 34),  // 原第一笔终点
+        ];
+        let out = process_strokes_fractals(&v, true, 4);
+        assert_eq!(out.len(), 3, "out={:?}", out);
+        assert!(out[0].is_top && out[0].bar_index == 4, "链头应为首个顶分型: out={:?}", out);
+        assert!(!out[1].is_top && out[1].bar_index == 20, "第二点 = 同向底极值: out={:?}", out);
+        assert!(out[2].is_top && out[2].bar_index == 34, "后续链不变: out={:?}", out);
+        // 第一笔方向 = 向下 (顶4→底20)
+        let strokes = build_strokes(&out);
+        assert_eq!(strokes.len(), 2);
+        assert!(!strokes[0].is_up && strokes[0].start_bar == 4 && strokes[0].end_bar == 20, "s0={:?}", strokes[0]);
+        assert!(strokes[1].is_up && strokes[1].start_bar == 20 && strokes[1].end_bar == 34, "s1={:?}", strokes[1]);
+    }
+
+    #[test]
+    fn test_stroke_first_reverse_no_insert_when_chain_starts_immediately() {
+        // 安全回退: 首分型直接成笔 (滑动区为空 → 无反向极值候选) → 链头不插入, 输出零变化
+        let v = vec![
+            fx(90.0, false, 0), fx(100.0, true, 5), fx(95.0, false, 9),
+        ];
+        let out = process_strokes_fractals(&v, true, 4);
+        assert_eq!(out.len(), 3, "out={:?}", out);
+        assert!(!out[0].is_top && out[0].bar_index == 0);
+        assert!(out[1].is_top && out[1].bar_index == 5);
+        assert!(!out[2].is_top && out[2].bar_index == 9);
+    }
+
+    #[test]
+    fn test_stroke_case4_up_basic() {
+        // 向上候选笔 B0(90)→T1(100) (位于索引1): 其后 (T1→B1)→(T2→B2) 下行连续新低收口于
+        // B2(93<94), 再 (B2→T3)→(B3→T4) 上行连续新高收口于 T4(99>98); 两笔整体 (93..99)
+        // 包含于 (90,100] (不破90 不超100) → 向上Case4 成立
+        let v = vec![
+            fx(90.0, false, 0), fx(100.0, true, 1), fx(94.0, false, 2), fx(97.0, true, 3),
+            fx(93.0, false, 4), fx(98.0, true, 5), fx(94.0, false, 6), fx(99.0, true, 7),
+        ];
+        assert!(check_up_stroke_case4(&v, 1, 90.0, 100.0));
+        // 方向不匹配: 同序列走向下Case4 (顶起点/底终点参数反了) → 不成立
+        assert!(!check_down_stroke_case4(&v, 1, 90.0, 100.0));
+    }
+
+    #[test]
+    fn test_stroke_case4_up_rejected() {
+        // 否定1: 后两笔突破 A 终点 (T4=101 > 100) → 不包含 → 拒绝
+        let v_hi = vec![
+            fx(90.0, false, 0), fx(100.0, true, 1), fx(94.0, false, 2), fx(97.0, true, 3),
+            fx(93.0, false, 4), fx(98.0, true, 5), fx(94.0, false, 6), fx(101.0, true, 7),
+        ];
+        assert!(!check_up_stroke_case4(&v_hi, 1, 90.0, 100.0));
+        // 否定2: 后两笔跌破 A 起点 (B2=88 < 90) → 不包含 → 拒绝
+        let v_lo = vec![
+            fx(90.0, false, 0), fx(100.0, true, 1), fx(94.0, false, 2), fx(97.0, true, 3),
+            fx(88.0, false, 4), fx(98.0, true, 5), fx(94.0, false, 6), fx(99.0, true, 7),
+        ];
+        assert!(!check_up_stroke_case4(&v_lo, 1, 90.0, 100.0));
+    }
+
+    #[test]
+    fn test_stroke_case4_down_basic() {
+        // 向下候选笔 T0(110)→B1(100) (位于索引1): 其后 (B1→T2)→(B2→T3)→(B3→T4) 上行连续
+        // 新高收口于 T4(108>106), 再 (T4→B4)→(T5→B5) 下行连续新低收口于 B5(100.5<101.5);
+        // 两笔整体 (100.5..108) 包含于 [100,110) (不破110 不下100) → 向下Case4 成立
+        let v = vec![
+            fx(110.0, true, 0), fx(100.0, false, 1), fx(107.0, true, 2), fx(103.0, false, 3),
+            fx(106.0, true, 4), fx(101.0, false, 5), fx(108.0, true, 6), fx(101.5, false, 7),
+            fx(107.0, true, 8), fx(100.5, false, 9),
+        ];
+        assert!(check_down_stroke_case4(&v, 1, 110.0, 100.0));
+    }
+
+    #[test]
+    fn test_stroke_case4_down_rejected() {
+        // 否定1: 反弹突破 A 起点 (T4=110.5 ≥ 110) → 拒绝 (镜像线段向下Case4: 严格 <)
+        let v_hi = vec![
+            fx(110.0, true, 0), fx(100.0, false, 1), fx(107.0, true, 2), fx(103.0, false, 3),
+            fx(106.0, true, 4), fx(101.0, false, 5), fx(110.5, true, 6), fx(101.5, false, 7),
+            fx(107.0, true, 8), fx(100.5, false, 9),
+        ];
+        assert!(!check_down_stroke_case4(&v_hi, 1, 110.0, 100.0));
+        // 否定2: 下行跌破 A 终点 (B5=98.5 < 100) → 拒绝 (镜像: < 即拒)
+        let v_lo = vec![
+            fx(110.0, true, 0), fx(100.0, false, 1), fx(107.0, true, 2), fx(103.0, false, 3),
+            fx(106.0, true, 4), fx(101.0, false, 5), fx(108.0, true, 6), fx(99.0, false, 7),
+            fx(107.0, true, 8), fx(98.5, false, 9),
+        ];
+        assert!(!check_down_stroke_case4(&v_lo, 1, 110.0, 100.0));
+    }
+
+    #[test]
+    fn test_stroke_case4_no_close_no_fire() {
+        // 无收口结构: 下行无连续新低 (B2=96 未低于 B1=94, 且后续无更低底) → 无完整两笔 → 不升格
+        // (与线段Case4 需成对 Case2 段同构: 仅相邻对不足以作证)
+        let v = vec![
+            fx(90.0, false, 0), fx(100.0, true, 1), fx(94.0, false, 2), fx(97.0, true, 3),
+            fx(96.0, false, 4), fx(98.0, true, 5),
+        ];
+        assert!(!check_up_stroke_case4(&v, 1, 90.0, 100.0));
+    }
+
+    #[test]
+    fn test_stroke_case4_process_up_promotion() {
+        // 端到端: 候选 (B0→T1) barDiff=1 不满足C1; C2 棘轮下移收口于更劣终点 T3(98<100,
+        // F1 需前前顶被突破, 首笔无前顶不触发) → C4 事后升格以 T1 落笔; 其后链自然衔接:
+        // T1→B2(93) C2收口 → B2→T4(99) C2收口 → 最终 [B0(90), T1(100), B2(93), T4(99)]
+        let v = vec![
+            fx(90.0, false, 0), fx(100.0, true, 1), fx(94.0, false, 2), fx(97.0, true, 3),
+            fx(93.0, false, 4), fx(98.0, true, 5), fx(94.0, false, 6), fx(99.0, true, 7),
+            fx(95.0, false, 8),
+        ];
+        let ff = process_strokes_fractals(&v, true, 4);
+        let got: Vec<(f64, bool)> = ff.iter().map(|x| (x.price, x.is_top)).collect();
+        assert_eq!(got, vec![(90.0, false), (100.0, true), (93.0, false), (99.0, true)], "ff={:?}", got);
+    }
+
+    #[test]
+    fn test_stroke_case4_process_down_promotion() {
+        // 端到端向下镜像: 候选 (T0→B1) C2 棘轮上移收口于更劣终点 B3(101>100) → C4 事后升格
+        // 以 B1 落笔; 其后链: B1→T4(108) C2收口 → T4→B5(100.5) C2收口 → 最终
+        // [T0(110), B1(100), T4(108), B5(100.5)]
+        let v = vec![
+            fx(110.0, true, 0), fx(100.0, false, 1), fx(107.0, true, 2), fx(103.0, false, 3),
+            fx(106.0, true, 4), fx(101.0, false, 5), fx(108.0, true, 6), fx(101.5, false, 7),
+            fx(107.0, true, 8), fx(100.5, false, 9),
+        ];
+        let ff = process_strokes_fractals(&v, true, 4);
+        let got: Vec<(f64, bool)> = ff.iter().map(|x| (x.price, x.is_top)).collect();
+        assert_eq!(got, vec![(110.0, true), (100.0, false), (108.0, true), (100.5, false)], "ff={:?}", got);
+    }
+
+    #[test]
+    fn test_stroke_case4_param_off_keeps_old_chain() {
+        // 参数化回归: case4 关闭 → 与历史行为一致 (C2 收于 T3(98), T4(99) 顶替换 → [B0,T4]),
+        // 即 2026-09-05 笔Case4 升格前旧链 (90→99 单笔, 100 高点被吞)
+        let v = vec![
+            fx(90.0, false, 0), fx(100.0, true, 1), fx(94.0, false, 2), fx(97.0, true, 3),
+            fx(93.0, false, 4), fx(98.0, true, 5), fx(94.0, false, 6), fx(99.0, true, 7),
+            fx(95.0, false, 8),
+        ];
+        let ff = process_strokes_fractals_with_cases(&v, true, false, 4);
+        let got: Vec<(f64, bool)> = ff.iter().map(|x| (x.price, x.is_top)).collect();
+        assert_eq!(got, vec![(90.0, false), (99.0, true)], "ff={:?}", got);
+    }
+
+    #[test]
+    fn test_stroke_case3_param_off() {
+        // 参数化: case3 关闭 → C3 强势突破不触发. 序列: B0(90)→T1(96) C1成笔(barDiff=5),
+        // B1(88) 破前底 90 但仅当 case3 开启才 C3 落笔
+        let v = vec![
+            fx(90.0, false, 0), fx(96.0, true, 5), fx(88.0, false, 6),
+        ];
+        // merged_index=idx 时 C1 的 mergedIndexDiff=1 不满足 → 必须拉开 merged 间距
+        let v2: Vec<Fractal> = v.iter().enumerate()
+            .map(|(k, f)| Fractal { price: f.price, is_top: f.is_top, bar_index: f.bar_index, merged_index: k * 2, time: f.time })
+            .collect();
+        let on = process_strokes_fractals_with_cases(&v2, true, true, 4);
+        let got_on: Vec<f64> = on.iter().map(|x| x.price).collect();
+        assert_eq!(got_on, vec![90.0, 96.0, 88.0], "on={:?}", got_on);
+        let off = process_strokes_fractals_with_cases(&v2, false, true, 4);
+        let got_off: Vec<f64> = off.iter().map(|x| x.price).collect();
+        assert_eq!(got_off, vec![90.0, 96.0], "off={:?}", got_off);
+    }
+
+    #[test]
+    fn test_stroke_cases_param_mapping() {
+        // 用户参数值 0/3/4/5 → 开关映射; 旧值 34 兼容; 未知值按全开
+        assert_eq!(StrokeCases::from_param(0), StrokeCases { case3: true, case4: true });
+        assert_eq!(StrokeCases::from_param(3), StrokeCases { case3: false, case4: true });
+        assert_eq!(StrokeCases::from_param(4), StrokeCases { case3: true, case4: false });
+        assert_eq!(StrokeCases::from_param(5), StrokeCases { case3: false, case4: false });
+        assert_eq!(StrokeCases::from_param(34), StrokeCases { case3: false, case4: false });
+        assert_eq!(StrokeCases::from_param(99), StrokeCases::default());
+    }
+
+    #[test]
+    fn test_levels_case4_off_segment() {
+        // 统一 levels 关 case4 (2026-09-05): 单笔A(100→120) 含后续(下+上)段对 → 全开时
+        // C4 单笔段 [0,0] 以最早终点胜出; 关 case4 → 走 C2 延伸段 [0,6] (历史行为)
+        let strokes = vec![
+            Stroke { start_price: 100.0, end_price: 120.0, start_bar: 0, end_bar: 2, is_up: true },
+            Stroke { start_price: 120.0, end_price: 112.0, start_bar: 3, end_bar: 5, is_up: false },
+            Stroke { start_price: 112.0, end_price: 116.0, start_bar: 6, end_bar: 8, is_up: true },
+            Stroke { start_price: 116.0, end_price: 110.0, start_bar: 9, end_bar: 11, is_up: false },
+            Stroke { start_price: 110.0, end_price: 115.0, start_bar: 12, end_bar: 14, is_up: true },
+            Stroke { start_price: 115.0, end_price: 113.0, start_bar: 15, end_bar: 17, is_up: false },
+            Stroke { start_price: 113.0, end_price: 119.0, start_bar: 18, end_bar: 20, is_up: true },
+        ];
+        let on = process_segments_with_cases(&strokes, true, true);
+        assert_eq!(on[0], (0usize, 0usize, true), "on={:?}", on);
+        let off = process_segments_with_cases(&strokes, true, false);
+        assert_eq!(off[0], (0usize, 6usize, true), "off={:?}", off);
+    }
+
+    #[test]
+    fn test_levels_case3_off_segment() {
+        // 统一 levels 关 case3 (2026-09-05): down(112→98) 跌破前 up C2 段起点 100 → 全开时
+        // C3 一笔当线段 [3,3]; 关 case3 → 无 C3 → 段链止于 up C2 [0,2]
+        let strokes = vec![
+            Stroke { start_price: 100.0, end_price: 110.0, start_bar: 0, end_bar: 2, is_up: true },
+            Stroke { start_price: 110.0, end_price: 105.0, start_bar: 3, end_bar: 5, is_up: false },
+            Stroke { start_price: 105.0, end_price: 112.0, start_bar: 6, end_bar: 8, is_up: true },
+            Stroke { start_price: 112.0, end_price: 98.0, start_bar: 9, end_bar: 11, is_up: false },
+        ];
+        let on = process_segments_with_cases(&strokes, true, true);
+        assert_eq!(on, vec![(0usize, 2usize, true), (3usize, 3usize, false)], "on={:?}", on);
+        let off = process_segments_with_cases(&strokes, false, true);
+        assert_eq!(off, vec![(0usize, 2usize, true)], "off={:?}", off);
+    }
+
 }

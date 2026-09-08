@@ -8,10 +8,11 @@
 //!   轨道: 5-6=笔轨, 7-8=线段轨, 9-10=大段轨
 //!   37=二买/二卖/三买/三卖文字 (mode 1=二买 2=二卖 3=三买 4=三卖)
 //!   39=中枢ZG, 40=中枢ZD, 41=中枢开始标记, 42=中枢结束标记
+//!   46=设置笔 case 参数, 49=设置线段~高级段 case 参数 (mode: 0全开/3关case3/4关case4/5关case34)
 
 use std::os::raw::{c_int, c_float, c_ushort};
 
-use chanlun_lean_lib::{ChanlunPipeline, guidao, zhongshu};
+use chanlun_lean_lib::{ChanlunPipeline, StrokeCases, guidao, zhongshu};
 
 // ── TDX 接口结构体 ──
 #[repr(C, packed(1))]
@@ -26,22 +27,77 @@ type PlugInFunc = unsafe extern "C" fn(c_int, *mut c_float, *mut c_float, *mut c
 use std::sync::Mutex;
 use std::sync::Arc;
 // Arc 共享 (2026-08-20 对齐 flowsurface P3/MT4: 命中/存缓存均免 from_parts 9 Vec 克隆; 全局 Mutex 跨线程故用 Arc 非 Rc)
-static PIPELINE_CACHE: Mutex<Option<(Vec<f64>, Vec<f64>, Arc<ChanlunPipeline>)>> = Mutex::new(None);
+// 2026-09-05 参数化: 缓存键含 (笔, 层) case 参数; case 状态存线程局部 TL_CASES —
+//   TDX GUI 各图表重算同线程且公式设置行先于数据行执行; 其他线程不调 46/49 → 恒全开.
+static PIPELINE_CACHE: Mutex<Option<((Vec<f64>, Vec<f64>, u8, u8), Arc<ChanlunPipeline>)>> = Mutex::new(None);
+
+thread_local! {
+    /// 用户 case 参数 (0/3/4/5, 默认 0=全开): (笔, 线段~高级段)
+    static TL_CASES: std::cell::RefCell<(u8, u8)> = const { std::cell::RefCell::new((0u8, 0u8)) };
+}
 
 /// 计算/命中管线 — 返回 Arc 共享引用 (对齐 flowsurface P3/MT4, 免 from_parts 9 Vec 克隆)
 fn get_pipeline(highs: Vec<f64>, lows: Vec<f64>) -> Arc<ChanlunPipeline> {
+    let (sc, lc) = TL_CASES.with(|c| *c.borrow());
     let mut cache = PIPELINE_CACHE.lock().unwrap();
-    if let Some((ref cached_h, ref cached_l, ref pipeline)) = *cache {
-        if cached_h.len() == highs.len() && cached_l.len() == lows.len()
-            && cached_h.first() == highs.first() && cached_l.first() == lows.first()
-            && cached_h.last() == highs.last() && cached_l.last() == lows.last()
+    if let Some((ref key, ref pipeline)) = *cache {
+        if key.0.len() == highs.len() && key.1.len() == lows.len()
+            && key.0.first() == highs.first() && key.1.first() == lows.first()
+            && key.0.last() == highs.last() && key.1.last() == lows.last()
+            && key.2 == sc && key.3 == lc
         {
             return Arc::clone(pipeline);
         }
     }
-    let rc = Arc::new(ChanlunPipeline::new(highs.clone(), lows.clone()));
-    *cache = Some((highs, lows, Arc::clone(&rc)));
+    let rc = Arc::new(ChanlunPipeline::new_with_cases(
+        highs.clone(), lows.clone(),
+        StrokeCases::from_param(sc), StrokeCases::from_param(lc),
+    ));
+    *cache = Some(((highs, lows, sc, lc), Arc::clone(&rc)));
     rc
+}
+
+// ── 缠论 case 参数设置 (2026-09-05; 默认 0=全开=历史行为零回归) ──
+// mark 46 = 笔参数, mark 49 = 线段~高级段参数 (两函数分开注册以区分槽位)
+// mode 值: 0全开 / 3关case3 / 4关case4 / 5关case34; 参数不变不动作, 变化才清管线缓存
+unsafe fn apply_case_param(slot: usize, m: u8) {
+    let changed = TL_CASES.with(|c| {
+        let mut t = c.borrow_mut();
+        let cur = if slot == 0 { t.0 } else { t.1 };
+        if cur != m {
+            if slot == 0 { t.0 = m; } else { t.1 = m; }
+            true
+        } else {
+            false
+        }
+    });
+    if changed {
+        *PIPELINE_CACHE.lock().unwrap() = None; // 参数变化 → 强制重建管线
+    }
+}
+
+unsafe extern "C" fn set_stroke_cases_fn(
+    data_len: c_int,
+    out: *mut c_float,
+    _highs_in: *mut c_float,
+    _lows_in: *mut c_float,
+    mode: *mut c_float,
+) {
+    let m = if mode.is_null() { 0 } else { *mode as u8 };
+    apply_case_param(0, m);
+    write_output(out, data_len as usize, &[]);
+}
+
+unsafe extern "C" fn set_level_cases_fn(
+    data_len: c_int,
+    out: *mut c_float,
+    _highs_in: *mut c_float,
+    _lows_in: *mut c_float,
+    mode: *mut c_float,
+) {
+    let m = if mode.is_null() { 0 } else { *mode as u8 };
+    apply_case_param(1, m);
+    write_output(out, data_len as usize, &[]);
 }
 
 // ── 辅助函数 ──
@@ -738,7 +794,7 @@ unsafe extern "C" fn zhongshu_fn(
 }
 
 // ── 函数注册表 ──
-static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 18] = [
+static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 20] = [
     // ── 开源: 分型/笔/线段/大段/高级段/三级轨道/买卖点/中枢 ──
     PluginTCalcFuncInfo { n_func_mark: 10, p_call_func: Some(big_segment_band_fn) },
     PluginTCalcFuncInfo { n_func_mark: 9, p_call_func: Some(big_segment_band_fn) },
@@ -756,6 +812,9 @@ static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 18] = [
     PluginTCalcFuncInfo { n_func_mark: 40, p_call_func: Some(zhongshu_fn) },
     PluginTCalcFuncInfo { n_func_mark: 41, p_call_func: Some(zhongshu_fn) },
     PluginTCalcFuncInfo { n_func_mark: 42, p_call_func: Some(zhongshu_fn) },
+    // ── 参数设置 (2026-09-05): 46=设笔 case 参数, 49=设线段~高级段 case 参数 ──
+    PluginTCalcFuncInfo { n_func_mark: 46, p_call_func: Some(set_stroke_cases_fn) },
+    PluginTCalcFuncInfo { n_func_mark: 49, p_call_func: Some(set_level_cases_fn) },
     PluginTCalcFuncInfo { n_func_mark: 0, p_call_func: None },
     PluginTCalcFuncInfo { n_func_mark: 0, p_call_func: None },
 ];
@@ -1746,5 +1805,57 @@ mod tests {
         assert_eq!(lower_from_vs.len(), 0, "lower from V空 signals: expected 0");
 
         eprintln!("✓ 大段轨道Case4 (新API) verified: 转多+紧邻转空→V空→上轨1pt, 下轨0pt");
+    }
+    /// 参数化: mark 46/49 设置 case 参数并失效重建管线 (2026-09-05)
+    #[test]
+    fn test_set_cases_invalidates_pipeline_and_table_registered() {
+        // 1) 函数表须注册 mark 46/49 (TDX lookup 按 n_func_mark; 走真实注册路径)
+        let mut marks: Vec<u16> = Vec::new();
+        unsafe {
+            let mut p: *mut PluginTCalcFuncInfo = std::ptr::null_mut();
+            RegisterTdxFunc(&mut p);
+            assert!(!p.is_null(), "RegisterTdxFunc 必须返回函数表");
+            let mut i = 0usize;
+            loop {
+                let e = std::ptr::read(p.add(i));
+                if e.n_func_mark == 0 { break; }   // sentinel 结束
+                marks.push(e.n_func_mark);
+                i += 1;
+            }
+        }
+        assert!(marks.contains(&46) && marks.contains(&49), "函数表须注册 mark 46/49, marks={marks:?}");
+
+        // 2) 默认全开: 设置 0 后管线可建
+        let highs: Vec<f64> = (0..40).map(|i| 100.0 + ((i % 10) as f64) * 0.5).collect();
+        let lows: Vec<f64> = (0..40).map(|i| 99.0 + ((i % 10) as f64) * 0.5).collect();
+        unsafe {
+            let mode0: f32 = 0.0;
+            let out: Vec<f32> = vec![0.0; 40];
+            set_stroke_cases_fn(40, out.as_ptr() as *mut f32, highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode0 as *const f32 as *mut f32);
+            set_level_cases_fn(40, out.as_ptr() as *mut f32, highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode0 as *const f32 as *mut f32);
+        }
+        let (sc, lc) = TL_CASES.with(|c| *c.borrow());
+        assert_eq!((sc, lc), (0, 0), "默认全开");
+        let _p = get_pipeline(highs.clone(), lows.clone());
+        assert!(PIPELINE_CACHE.lock().unwrap().is_some(), "管线应已构建");
+
+        // 3) 改参 (5,5) → 清缓存 → 重建后 TL_CASES 生效
+        unsafe {
+            let mode5: f32 = 5.0;
+            let out: Vec<f32> = vec![0.0; 40];
+            set_stroke_cases_fn(40, out.as_ptr() as *mut f32, highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode5 as *const f32 as *mut f32);
+            set_level_cases_fn(40, out.as_ptr() as *mut f32, highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode5 as *const f32 as *mut f32);
+        }
+        let (sc2, lc2) = TL_CASES.with(|c| *c.borrow());
+        assert_eq!((sc2, lc2), (5, 5), "参数应写入 (5,5)");
+        assert!(PIPELINE_CACHE.lock().unwrap().is_none(), "参数变化应清管线缓存");
+
+        // 复位避免污染其他测试 (同线程共享 TL_CASES)
+        unsafe {
+            let mode0: f32 = 0.0;
+            let out: Vec<f32> = vec![0.0; 40];
+            set_stroke_cases_fn(40, out.as_ptr() as *mut f32, highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode0 as *const f32 as *mut f32);
+            set_level_cases_fn(40, out.as_ptr() as *mut f32, highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode0 as *const f32 as *mut f32);
+        }
     }
 }

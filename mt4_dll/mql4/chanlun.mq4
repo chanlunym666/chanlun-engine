@@ -44,8 +44,12 @@
 #property indicator_width15 2
 #property indicator_width16 2
 
+input int ChanlunStrokeCases = 0; // 笔: 0全开 / 3关c3 / 4关c4 / 5关c34
+input int ChanlunLevelCases  = 0; // 线段~高级段: 0全开 / 3关c3 / 4关c4 / 5关c34
+input int ChanlunBandDisplay = 0; // 1不显笔轨 / 2不显线轨 / 3不显大轨 / 4不显三轨
 #import "slzs_chanlun_mt4.dll"
    int chanlun_init(int rates_total, double &highs[], double &lows[]);
+   int chanlun_set_cases(int stroke_param, int levels_param);
    int chanlun_get_strokes(double &upBuf[], double &downBuf[]);
    int chanlun_get_segments(double &upBuf[], double &downBuf[]);
    int chanlun_get_bigsegments(double &upBuf[], double &downBuf[]);
@@ -123,6 +127,7 @@ int OnCalculate(const int rates_total,
    for(int i = 0; i < rates_total; i++)
    {  h[i] = high[rates_total-1-i]; l[i] = low[rates_total-1-i]; }
 
+   chanlun_set_cases(ChanlunStrokeCases, ChanlunLevelCases);
    int initOk = chanlun_init(rates_total, h, l);
    if(initOk == 0) return(rates_total);
 
@@ -143,6 +148,13 @@ int OnCalculate(const int rates_total,
    int sg = chanlun_get_segment_bands(sgbUp, sgbDown, sgbMid);
    int bg = chanlun_get_bigseg_bands(bgbUp, bgbDown, bgbMid);
    int sup = chanlun_get_superior_segments(supUp, supDown);
+   // 轨道显示开关 (0全显/1不显笔轨/2不显线轨/3不显大轨/4不显三轨)
+   if(ChanlunBandDisplay == 1 || ChanlunBandDisplay == 4)
+   { ArrayInitialize(bandUp, EMPTY_VALUE); ArrayInitialize(bandDown, EMPTY_VALUE); }
+   if(ChanlunBandDisplay == 2 || ChanlunBandDisplay == 4)
+   { ArrayInitialize(sgbUp, EMPTY_VALUE); ArrayInitialize(sgbDown, EMPTY_VALUE); }
+   if(ChanlunBandDisplay == 3 || ChanlunBandDisplay == 4)
+   { ArrayInitialize(bgbUp, EMPTY_VALUE); ArrayInitialize(bgbDown, EMPTY_VALUE); }
 
    // ═══ 大段中枢矩形 (深天蓝 + 背景半透明填充) ═══
    for(int oi3 = ObjectsTotal()-1; oi3 >= 0; oi3--) { string on3 = ObjectName(oi3);

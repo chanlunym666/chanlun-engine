@@ -40,6 +40,9 @@ unsafe fn read_f64s(ptr: *const f64, len: usize) -> Vec<f64> {
 thread_local! {
     static TL_PIPELINE: RefCell<Option<(Vec<f64>, Vec<f64>, usize, Rc<ChanlunPipeline>)>> = RefCell::new(None);
     static TL_RATES_TOTAL: RefCell<usize> = RefCell::new(0);
+    /// 缠论参数 (指标 Parameters 标签 input 传入; 0/3/4/5 语义同库 StrokeCases::from_param;
+    /// 默认 (0,0) 全开 = 历史行为; 由 chanlun_set_cases 写入, 写入时清 TL_PIPELINE 强制按新参重建)
+    static TL_CASES: RefCell<(u8, u8)> = const { RefCell::new((0u8, 0u8)) };
 }
 
 // ── 独立标记/中枢缓存 (单线程, 零锁) ──
@@ -64,7 +67,12 @@ fn get_pipeline(highs: Vec<f64>, lows: Vec<f64>) -> Rc<ChanlunPipeline> {
                 return Some(Rc::clone(pipeline));
             }
         }
-        let rc = Rc::new(ChanlunPipeline::new(highs.clone(), lows.clone()));
+        let rc = Rc::new(ChanlunPipeline::new_with_cases(
+            highs.clone(),
+            lows.clone(),
+            chanlun_lean_lib::StrokeCases::from_param(TL_CASES.with(|c| c.borrow().0)),
+            chanlun_lean_lib::StrokeCases::from_param(TL_CASES.with(|c| c.borrow().1)),
+        ));
         *cache = Some((highs, lows, n, Rc::clone(&rc)));
         Some(rc)
     });
@@ -140,6 +148,39 @@ pub unsafe extern "system" fn chanlun_init(
     unsafe { MARKERS_COMPUTED = false; }
     unsafe { ZHONGSHUS_COMPUTED = false; }
 
+    1 // 成功
+}
+
+/// 设置缠论参数 (指标 Parameters 标签 input 传入):
+/// stroke_param = 笔 Case 参数 0/3/4/5 (0全开/3关case3/4关case4/5关case34);
+/// levels_param = 线段~高级段统一 levels 参数 (同语义).
+/// 独立缓存 (TL_CASES), 不触碰 chanlun_init; 参数变化 → 清 TL_PIPELINE,
+/// 下次 chanlun_init 强制按新参数重建管线 (标记/中枢缓存随 init 重置).
+/// 默认 (0,0) 全开 = 与未调用时历史行为完全一致.
+///
+/// MQL4 调用: int chanlun_set_cases(int stroke_param, int levels_param);
+/// 返回: 1=成功
+#[export_name = "chanlun_set_cases"]
+pub unsafe extern "system" fn chanlun_set_cases(
+    stroke_param: c_int,
+    levels_param: c_int,
+) -> c_int {
+    let stroke = stroke_param as u8;
+    let levels = levels_param as u8;
+    let changed = TL_CASES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != stroke || c.1 != levels {
+            *c = (stroke, levels);
+            true
+        } else {
+            false
+        }
+    });
+    if changed {
+        // 参数变化 → 旧管线失效 (同数据缓存命中会沿用旧参数管线)
+        TL_PIPELINE.with(|cell| *cell.borrow_mut() = None);
+        TL_RATES_TOTAL.with(|rt| *rt.borrow_mut() = 0);
+    }
     1 // 成功
 }
 
@@ -842,4 +883,26 @@ mod tests {
         eprintln!("\n✓ E2E fractal pipeline self-check PASSED");
     }
 
+    /// 参数化: chanlun_set_cases 写入 TL_CASES 并清 TL_PIPELINE (2026-09-05)
+    #[test]
+    fn test_set_cases_invalidates_pipeline() {
+        unsafe {
+            chanlun_set_cases(0, 0); // 默认
+            assert_eq!(TL_CASES.with(|c| *c.borrow()), (0u8, 0u8), "默认全开");
+
+            let highs: Vec<f64> = (0..40).map(|i| 100.0 + ((i % 10) as f64) * 0.5).collect();
+            let lows: Vec<f64> = (0..40).map(|i| 99.0 + ((i % 10) as f64) * 0.5).collect();
+            let h = highs.as_ptr(); let l = lows.as_ptr();
+            chanlun_init(40, h, l);
+            assert!(TL_PIPELINE.with(|c| c.borrow().is_some()), "管线应已构建");
+
+            let ret = chanlun_set_cases(5, 5); // 关 case3+4
+            assert_eq!(ret, 1, "成功返回 1");
+            assert_eq!(TL_CASES.with(|c| *c.borrow()), (5u8, 5u8), "TL_CASES 应写入 (5,5)");
+            assert!(TL_PIPELINE.with(|c| c.borrow().is_none()), "参数变化应清管线缓存");
+            assert_eq!(TL_RATES_TOTAL.with(|c| *c.borrow()), 0, "rates_total 应复位");
+
+            chanlun_set_cases(0, 0); // 复位, 避免污染其他测试 (thread_local 隔离)
+        }
+    }
 }
