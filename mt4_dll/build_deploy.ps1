@@ -1,5 +1,5 @@
 ﻿# Build + Deploy slzs_chanlun_mt4.dll to MT4 (32-bit DLL)
-# 开源社区版构建脚本: 在 chanlun_kaiyuan 副本上构建, 正式仓库零触碰
+# 构建脚本: 在本仓库 (chanlun_kaiyuan) 上构建并部署到本机 MT4
 # MT4 仅支持 32 位 DLL → 必须 --target i686-pc-windows-msvc
 # ⚠️ 通达信是 64 位 (x86_64) / MT4 是 32 位 (i686) — 永不混淆
 # Usage: powershell -File build_deploy.ps1
@@ -105,7 +105,7 @@ $ex4Dst = [System.IO.Path]::ChangeExtension($mql4Dst, ".ex4")
 Write-Host "[4/5] MQL4 source: $mql4Dst (唯一副本)" -ForegroundColor Yellow
 if (Test-Path $mql4Dst) {
     # 删除旧 .ex4 后用 metaeditor 主动重编译
-    # ⚠️ 2026-08-14 教训: MT4 build 1473 启动/加载时不会自动编译 ex4 缺失的指标,
+    # ⚠️ MT4 启动/加载指标时不会自动编译缺失的 ex4,
     #    仅删 ex4 会导致指标加载失败 — 必须主动编译生成新 ex4
     if (Test-Path $ex4Dst) {
         Remove-Item $ex4Dst -Force
