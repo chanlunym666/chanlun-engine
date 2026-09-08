@@ -44,7 +44,7 @@
 #property indicator_width15 2
 #property indicator_width16 2
 
-input int ChanlunStrokeCases = 0; // 笔: 0全开 / 3关c3 / 4关c4 / 5关c34
+input int ChanlunStrokeCases = 3; // 笔: 0全开 / 3关c3 / 4关c4 / 5关c34 (默认3=关case3)
 input int ChanlunLevelCases  = 0; // 线段~高级段: 0全开 / 3关c3 / 4关c4 / 5关c34
 input int ChanlunBandDisplay = 0; // 1不显笔轨 / 2不显线轨 / 3不显大轨 / 4不显三轨
 #import "slzs_chanlun_mt4.dll"
