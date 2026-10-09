@@ -6,7 +6,10 @@
 //!   TDXDLL3(编号, HIGH, LOW, mode)
 //!   编号1=分型, 2=笔, 3=线段, 4=大段, 35=高级段
 //!   轨道: 5-6=笔轨, 7-8=线段轨, 9-10=大段轨
-//!   37=二买/二卖/三买/三卖文字 (mode 1=二买 2=二卖 3=三买 4=三卖)
+//!   37=大段买卖点文字 (mode 1=大二买 2=大二卖 3=大三买 4=大三卖;
+//!       5..8=大2+1~4买 9..12=大2+1~4卖; 13=大一买 14=大一卖)
+//!   43/44/45=高级段买卖点文字 (43: 1=高二买 2=高二卖 13=高一买 14=高一卖;
+//!       44: 3..6=高2+1~4买 7..10=高2+1~4卖; 45: 11=高三买 12=高3卖)
 //!   39=中枢ZG, 40=中枢ZD, 41=中枢开始标记, 42=中枢结束标记
 //!   46=设置笔 case 参数, 49=设置线段~高级段 case 参数 (mode: 0全开/3关case3/4关case4/5关case34)
 
@@ -692,9 +695,48 @@ unsafe extern "C" fn big_segment_band_fn(
     write_output(out, dl, &values);
 }
 
-// ── 买卖点标记输入链 (中枢 → 二买二卖 → 三买三卖 → 2+N买/卖 → 撤回过滤) ──
-// 返回 (second_markers, third_markers), 供 mark 37 输出 (mode 1-4)
-fn build_markers(
+// ── 大段买卖点族 (中枢 → 二买二卖 + 三买三卖 + 2+N买/卖 + 宿主撤回过滤 + 一买/一卖) ──
+// 返回 (大二买/大二卖, 大三买/大三卖, 大2+N买/大2+N卖, 大一买/大一卖)
+// 前三组已过撤回过滤; 一买/一卖独立检测不套撤回过滤
+fn build_big_markers(
+    sups: &[(usize, usize, bool)],
+    bigs: &[(usize, usize, bool)],
+    segs: &[(usize, usize, bool)],
+    strokes: &[chanlun_lean_lib::Stroke],
+    highs: &[f64],
+    lows: &[f64],
+    levels_cases: StrokeCases,
+) -> (
+    Vec<chanlun_lean_lib::SecondMarker>,
+    Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>,
+    Vec<chanlun_lean_lib::guidao::SecondPlusOneMarker>,
+    Vec<chanlun_lean_lib::zhongshu::BigSegFirstMarker>,
+) {
+    let zs = chanlun_lean_lib::zhongshu::detect_bigseg_zhongshus(sups, bigs, segs, strokes);
+    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数)
+    let mut sm = chanlun_lean_lib::detect_second_buy_markers(strokes, segs, bigs, sups);
+    sm.extend(chanlun_lean_lib::detect_second_sell_markers(strokes, segs, bigs, sups));
+    let tm = chanlun_lean_lib::zhongshu::detect_bigseg_third_marks(sups, bigs, segs, strokes, &zs, highs, lows);
+    // 大段 2+N买/卖 (C>F 结构判定, 不依赖轨道参数 — 参数仅为签名兼容保留)
+    let (blc1, db) = guidao::calc_bigseg_lower_band_case1(bigs, segs, strokes);
+    let (buc1, ub) = guidao::calc_bigseg_upper_band_case1(bigs, segs, strokes);
+    let mut pm = guidao::detect_bigseg_cf_buy_markers(sups, bigs, segs, strokes, &blc1, &db, &ub);
+    pm.extend(guidao::detect_bigseg_cf_sell_markers(sups, bigs, segs, strokes, &buc1, &ub, &db));
+    // 宿主撤回过滤: 撤回后标记 = 输出标记
+    let rf = guidao::apply_sup_retreat_filter(sups, bigs, segs, strokes, sm, tm, pm, vec![]);
+    // 大一买/大一卖 (独立检测, 不套用撤回过滤; 层参数与管线同源)
+    let mut first = chanlun_lean_lib::zhongshu::detect_bigseg_first_buy_markers(
+        strokes, segs, bigs, levels_cases,
+    );
+    first.extend(chanlun_lean_lib::zhongshu::detect_bigseg_first_sell_markers(
+        strokes, segs, bigs, levels_cases,
+    ));
+    (rf.second_markers, rf.third_markers, rf.plus_markers, first)
+}
+
+// ── 高级段买卖点族 (高二买/高二卖 + 高2+N买/卖 + 高三买/高3卖 + 高一买/高一卖) ──
+// 前三组已过高高级段撤回过滤; 高一买/卖独立检测不套撤回过滤
+fn build_superior_markers(
     sups: &[(usize, usize, bool)],
     bigs: &[(usize, usize, bool)],
     segs: &[(usize, usize, bool)],
@@ -704,24 +746,23 @@ fn build_markers(
 ) -> (
     Vec<chanlun_lean_lib::SecondMarker>,
     Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>,
+    Vec<chanlun_lean_lib::guidao::SecondPlusOneMarker>,
 ) {
-    let zs = chanlun_lean_lib::zhongshu::detect_bigseg_zhongshus(sups, bigs, segs, strokes);
-    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数)
-    let mut sm = chanlun_lean_lib::detect_second_buy_markers(strokes, segs, bigs, sups);
-    sm.extend(chanlun_lean_lib::detect_second_sell_markers(strokes, segs, bigs, sups));
-    let tm = chanlun_lean_lib::zhongshu::detect_bigseg_third_marks(sups, bigs, segs, strokes, &zs, highs, lows);
-    // 2+N买/卖
-    let (blc1, db) = guidao::calc_bigseg_lower_band_case1(bigs, segs, strokes);
-    let (buc1, ub) = guidao::calc_bigseg_upper_band_case1(bigs, segs, strokes);
-    let mut pm = guidao::detect_bigseg_cf_buy_markers(sups, bigs, segs, strokes, &blc1, &db, &ub);
-    pm.extend(guidao::detect_bigseg_cf_sell_markers(sups, bigs, segs, strokes, &buc1, &ub, &db));
-    // 撤回过滤: 标记输出=过滤后标记
-    let rf = guidao::apply_sup_retreat_filter(sups, bigs, segs, strokes, sm, tm, pm);
-    (rf.second_markers, rf.third_markers)
+    let mut ssm = chanlun_lean_lib::detect_superior_second_buy_markers(strokes, segs, bigs, sups);
+    ssm.extend(chanlun_lean_lib::detect_superior_second_sell_markers(strokes, segs, bigs, sups));
+    let mut spm = chanlun_lean_lib::detect_superior_cf_buy_markers(strokes, segs, bigs, sups);
+    spm.extend(chanlun_lean_lib::detect_superior_cf_sell_markers(strokes, segs, bigs, sups));
+    let szs = chanlun_lean_lib::zhongshu::detect_superior_zhongshus(strokes, segs, bigs, sups);
+    let stm = chanlun_lean_lib::zhongshu::detect_superior_third_marks(sups, bigs, segs, strokes, &szs, highs, lows);
+    let sup_ret = chanlun_lean_lib::zhongshu::apply_sup2_retreat_filter(sups, bigs, segs, strokes, ssm, stm, spm);
+    (sup_ret.superior_second_markers, sup_ret.superior_third_markers, sup_ret.superior_plus_markers)
 }
 
-// ── 二买/二卖/三买/三卖 文字标记 (mark 37) ──
-// mode 1=二买 2=二卖 3=三买 4=三卖; 输出=标记价格 (文字定位点)
+// ── 大段买卖点文字标记 (mark 37) ──
+// mode 表 (append-only: 1-4 原义不变):
+//   1=大二买 2=大二卖 3=大三买 4=大三卖
+//   5..8=大2+1~4买 9..12=大2+1~4卖  13=大一买 14=大一卖
+// 输出=标记价格 (文字定位点); 使用撤回后标记
 unsafe extern "C" fn buy_sell_markers_fn(
     data_len: c_int,
     out: *mut c_float,
@@ -738,8 +779,9 @@ unsafe extern "C" fn buy_sell_markers_fn(
     let big_segs = &pipeline.big_segments;
     let segs = &pipeline.segments;
     let pl_strokes = &pipeline.strokes;
-    let (sm, tm) = build_markers(
-        &pipeline.superior_segments, big_segs, segs, pl_strokes, &highs, &lows,
+    let levels = StrokeCases::from_param(TL_CASES.with(|c| c.borrow().1));
+    let (sm, tm, pm, fm) = build_big_markers(
+        &pipeline.superior_segments, big_segs, segs, pl_strokes, &highs, &lows, levels,
     );
 
     let mut values: Vec<(usize, f32)> = Vec::new();
@@ -748,6 +790,75 @@ unsafe extern "C" fn buy_sell_markers_fn(
         2 => { for x in &sm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
         3 => { for x in &tm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
         4 => { for x in &tm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        5..=8 => {
+            let order = (m - 4) as u32;
+            for x in &pm { if x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+        }
+        9..=12 => {
+            let order = (m - 8) as u32;
+            for x in &pm { if !x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+        }
+        13 => { for x in &fm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        14 => { for x in &fm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        _ => {}
+    }
+    write_output(out, dl, &values);
+}
+
+// ── 高级段买卖点文字标记 (mark 43/44/45 共用) ──
+// mode 表: 1=高二买 2=高二卖 (43 槽); 3..6=高2+1~4买 7..10=高2+1~4卖 (44 槽);
+//          11=高三买 12=高3卖 (45 槽); 13=高一买 14=高一卖 (43 槽, 独立检测不套撤回)
+unsafe extern "C" fn buy_sell_markers_sup_fn(
+    data_len: c_int,
+    out: *mut c_float,
+    highs_in: *mut c_float,
+    lows_in: *mut c_float,
+    mode: *mut c_float,
+) {
+    let dl = data_len as usize;
+    let highs = read_floats(highs_in, dl);
+    let lows = read_floats(lows_in, dl);
+    let m = *mode as i32;
+
+    let pipeline = get_pipeline(highs.clone(), lows.clone());
+    let big_segs = &pipeline.big_segments;
+    let segs = &pipeline.segments;
+    let pl_strokes = &pipeline.strokes;
+    let (ssm, stm, spm) = build_superior_markers(
+        &pipeline.superior_segments, big_segs, segs, pl_strokes, &highs, &lows,
+    );
+
+    let mut values: Vec<(usize, f32)> = Vec::new();
+    match m {
+        1 => { for x in &ssm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        2 => { for x in &ssm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        3..=6 => {
+            let order = (m - 2) as u32;
+            for x in &spm { if x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+        }
+        7..=10 => {
+            let order = (m - 6) as u32;
+            for x in &spm { if !x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+        }
+        11 => { for x in &stm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        12 => { for x in &stm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        // 13/14 高一买/高一卖: 独立检测不套撤回过滤; 层参数与管线同源
+        13 | 14 => {
+            let (_, lc_cases) = TL_CASES.with(|c| *c.borrow());
+            let lvl = StrokeCases::from_param(lc_cases);
+            let want_buy = m == 13;
+            let mut fms = zhongshu::detect_superior_first_buy_markers(
+                pl_strokes, segs, big_segs, &pipeline.superior_segments, lvl,
+            );
+            fms.extend(zhongshu::detect_superior_first_sell_markers(
+                pl_strokes, segs, big_segs, &pipeline.superior_segments, lvl,
+            ));
+            for x in &fms {
+                if x.is_buy == want_buy {
+                    values.push((x.bar_index, x.price as f32));
+                }
+            }
+        }
         _ => {}
     }
     write_output(out, dl, &values);
@@ -770,7 +881,8 @@ unsafe extern "C" fn zhongshu_fn(
     let use_marker = m == 41 || m == 42;
 
     let pipeline = get_pipeline(highs.clone(), lows.clone());
-    let zs = zhongshu::detect_bigseg_zhongshus(
+    // 中枢矩形来源: detect_bigseg_zhongshus_by_overlap (反向大段重叠口径, 高级段内全部中枢)
+    let zs = zhongshu::detect_bigseg_zhongshus_by_overlap(
         &pipeline.superior_segments, &pipeline.big_segments,
         &pipeline.segments, &pipeline.strokes,
     );
@@ -793,7 +905,7 @@ unsafe extern "C" fn zhongshu_fn(
 }
 
 // ── 函数注册表 ──
-static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 20] = [
+static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 23] = [
     // ── 开源: 分型/笔/线段/大段/高级段/三级轨道/买卖点/中枢 ──
     PluginTCalcFuncInfo { n_func_mark: 10, p_call_func: Some(big_segment_band_fn) },
     PluginTCalcFuncInfo { n_func_mark: 9, p_call_func: Some(big_segment_band_fn) },
@@ -807,6 +919,9 @@ static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 20] = [
     PluginTCalcFuncInfo { n_func_mark: 1, p_call_func: Some(fractals_fn) },
     PluginTCalcFuncInfo { n_func_mark: 35, p_call_func: Some(superior_segments_fn) },
     PluginTCalcFuncInfo { n_func_mark: 37, p_call_func: Some(buy_sell_markers_fn) },
+    PluginTCalcFuncInfo { n_func_mark: 43, p_call_func: Some(buy_sell_markers_sup_fn) },
+    PluginTCalcFuncInfo { n_func_mark: 44, p_call_func: Some(buy_sell_markers_sup_fn) },
+    PluginTCalcFuncInfo { n_func_mark: 45, p_call_func: Some(buy_sell_markers_sup_fn) },
     PluginTCalcFuncInfo { n_func_mark: 39, p_call_func: Some(zhongshu_fn) },
     PluginTCalcFuncInfo { n_func_mark: 40, p_call_func: Some(zhongshu_fn) },
     PluginTCalcFuncInfo { n_func_mark: 41, p_call_func: Some(zhongshu_fn) },
@@ -1588,10 +1703,20 @@ mod tests {
             (4, 4, true),  // high=strokes[4].end_price=30, bar=strokes[4].end_bar=50
         ];
         let (upper_bp, up_big) = guidao::calc_bigseg_upper_band_case1(&big_segs_upper, &segs_upper, &strokes_upper);
-        assert_eq!(upper_bp.len(), 1, "upper Case1: expected 1 point");
+        // 确认门: 序列止于第三顶 (无后续反向大段) 不得产出轨点
+        assert_eq!(upper_bp.len(), 0, "upper Case1: unconfirmed (no following down big-seg) → no point");
+        // 补第一根反向大段后确认: 轨点 = 第一顶 (bar 10, value 50)
+        let mut strokes_confirm = strokes_upper.clone();
+        strokes_confirm.push(Stroke { start_price: 30.0, end_price: 12.0, start_bar: 50, end_bar: 60, is_up: false });
+        let mut segs_confirm = segs_upper.clone();
+        segs_confirm.push((5, 5, false));
+        let mut bigs_confirm = big_segs_upper.clone();
+        bigs_confirm.push((5, 5, false));
+        let (upper_bp, up_big) = guidao::calc_bigseg_upper_band_case1(&bigs_confirm, &segs_confirm, &strokes_confirm);
+        assert_eq!(upper_bp.len(), 1, "upper Case1 confirmed: expected 1 point");
         assert_eq!(upper_bp[0].bar_index, 10, "bar should be strokes[0].end_bar=10");
         assert!((upper_bp[0].value - 50.0).abs() < 0.001, "value should be 50");
-        assert_eq!(up_big.len(), 3, "should have 3 up big-segments");
+        assert_eq!(up_big.len(), 3, "should have 3 up big-segments in tracking");
 
         // === 下轨Case1: 下降大段三重底 ===
         // 3个下降大段, 低点依次升高: 10 < 15 < 20
@@ -1614,10 +1739,20 @@ mod tests {
             (4, 4, false), // low=strokes[4].end_price=20, bar=strokes[4].end_bar=50
         ];
         let (lower_bp, down_big) = guidao::calc_bigseg_lower_band_case1(&big_segs_lower, &segs_lower, &strokes_lower);
-        assert_eq!(lower_bp.len(), 1, "lower Case1: expected 1 point");
+        // 确认门: 序列止于第三底 (无后续反向大段) 不得产出轨点
+        assert_eq!(lower_bp.len(), 0, "lower Case1: unconfirmed (no following up big-seg) → no point");
+        // 补第一根反向大段后确认: 轨点 = 第一底 (bar 10, value 10)
+        let mut strokes_confirm = strokes_lower.clone();
+        strokes_confirm.push(Stroke { start_price: 20.0, end_price: 45.0, start_bar: 50, end_bar: 60, is_up: true });
+        let mut segs_confirm = segs_lower.clone();
+        segs_confirm.push((5, 5, true));
+        let mut bigs_confirm = big_segs_lower.clone();
+        bigs_confirm.push((5, 5, true));
+        let (lower_bp, down_big) = guidao::calc_bigseg_lower_band_case1(&bigs_confirm, &segs_confirm, &strokes_confirm);
+        assert_eq!(lower_bp.len(), 1, "lower Case1 confirmed: expected 1 point");
         assert_eq!(lower_bp[0].bar_index, 10, "bar should be strokes[0].end_bar=10");
         assert!((lower_bp[0].value - 10.0).abs() < 0.001, "value should be 10");
-        assert_eq!(down_big.len(), 3, "should have 3 down big-segments");
+        assert_eq!(down_big.len(), 3, "should have 3 down big-segments in tracking");
 
         // === 负面验证: 高点依次升高 → 不满足三重顶 ===
         let strokes_neg = vec![

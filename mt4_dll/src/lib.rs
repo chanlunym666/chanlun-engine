@@ -47,7 +47,12 @@ thread_local! {
 
 // ── 独立标记/中枢缓存 (单线程, 零锁) ──
 static mut MARKERS_COMPUTED: bool = false;
-static mut MARKERS_CACHE: Vec<(usize, u8, f64)> = Vec::new(); // (bar_index, kind, price) kind: 0=二买 1=二卖 2=三买 3=三卖
+// (bar_index, kind, price, order) kind: 0=二买 1=二卖 2=三买 3=三卖 4/5=2+N买/卖 6/7=一买/一卖
+static mut MARKERS_CACHE: Vec<(usize, u8, f64, i32)> = Vec::new();
+// ── 高级段买卖点缓存 ──
+static mut SUPERIOR_MARKERS_COMPUTED: bool = false;
+// kind: 0=高二买 1=高二卖 2/3=高2+N买/卖 4/5=高三买/高3卖 6/7=高一买/高一卖
+static mut SUPERIOR_MARKERS_CACHE: Vec<(usize, u8, f64, i32)> = Vec::new();
 // ── 大段中枢矩形缓存 (矩形 + ZG/ZD 上下沿) ──
 static mut ZHONGSHUS_COMPUTED: bool = false;
 static mut ZHONGSHUS_CACHE: Vec<(usize, usize, f64, f64)> = Vec::new(); // (start_bar, end_bar, zg, zd)
@@ -94,9 +99,48 @@ fn get_cached_rates_total() -> usize {
 
 // ── 辅助函数 ──
 
-/// 构建买卖点标记输入链 (中枢 → 二买二卖 → 三买三卖 → 2+N买/卖 → 撤回过滤)
-/// 返回 (second_markers, third_markers), 供 chanlun_markers_compute 渲染
-fn build_markers(
+/// 大段买卖点族 (中枢 → 二买二卖 + 三买三卖 + 2+N买/卖 + 宿主撤回过滤 + 一买/一卖)
+/// 返回 (大二买/大二卖, 大三买/大三卖, 大2+N买/大2+N卖, 大一买/大一卖)
+/// 前三组已过撤回过滤; 一买/一卖独立检测不套撤回过滤
+fn build_big_markers(
+    sups: &[(usize, usize, bool)],
+    bigs: &[(usize, usize, bool)],
+    segs: &[(usize, usize, bool)],
+    strokes: &[chanlun_lean_lib::Stroke],
+    highs: &[f64],
+    lows: &[f64],
+    levels_cases: chanlun_lean_lib::StrokeCases,
+) -> (
+    Vec<chanlun_lean_lib::SecondMarker>,
+    Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>,
+    Vec<chanlun_lean_lib::guidao::SecondPlusOneMarker>,
+    Vec<chanlun_lean_lib::zhongshu::BigSegFirstMarker>,
+) {
+    let zs = chanlun_lean_lib::zhongshu::detect_bigseg_zhongshus(sups, bigs, segs, strokes);
+    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数)
+    let mut sm = chanlun_lean_lib::detect_second_buy_markers(strokes, segs, bigs, sups);
+    sm.extend(chanlun_lean_lib::detect_second_sell_markers(strokes, segs, bigs, sups));
+    let tm = chanlun_lean_lib::zhongshu::detect_bigseg_third_marks(sups, bigs, segs, strokes, &zs, highs, lows);
+    // 大段 2+N买/卖 (C>F 结构判定, 不依赖轨道参数 — 参数仅为签名兼容保留)
+    let (blc1, db) = guidao::calc_bigseg_lower_band_case1(bigs, segs, strokes);
+    let (buc1, ub) = guidao::calc_bigseg_upper_band_case1(bigs, segs, strokes);
+    let mut pm = guidao::detect_bigseg_cf_buy_markers(sups, bigs, segs, strokes, &blc1, &db, &ub);
+    pm.extend(guidao::detect_bigseg_cf_sell_markers(sups, bigs, segs, strokes, &buc1, &ub, &db));
+    // 宿主撤回过滤: 撤回后标记 = 输出标记
+    let rf = guidao::apply_sup_retreat_filter(sups, bigs, segs, strokes, sm, tm, pm, vec![]);
+    // 大一买/大一卖 (独立检测, 不套用撤回过滤; 层参数与管线同源)
+    let mut first = chanlun_lean_lib::zhongshu::detect_bigseg_first_buy_markers(
+        strokes, segs, bigs, levels_cases,
+    );
+    first.extend(chanlun_lean_lib::zhongshu::detect_bigseg_first_sell_markers(
+        strokes, segs, bigs, levels_cases,
+    ));
+    (rf.second_markers, rf.third_markers, rf.plus_markers, first)
+}
+
+/// 高级段买卖点族 (高二买/高二卖 + 高2+N买/卖 + 高三买/高3卖 + 高一买/高一卖)
+/// 前三组已过高高级段撤回过滤; 高一买/卖独立检测不套撤回过滤
+fn build_superior_markers(
     sups: &[(usize, usize, bool)],
     bigs: &[(usize, usize, bool)],
     segs: &[(usize, usize, bool)],
@@ -106,20 +150,18 @@ fn build_markers(
 ) -> (
     Vec<chanlun_lean_lib::SecondMarker>,
     Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>,
+    Vec<chanlun_lean_lib::guidao::SecondPlusOneMarker>,
 ) {
-    let zs = chanlun_lean_lib::zhongshu::detect_bigseg_zhongshus(sups, bigs, segs, strokes);
-    // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数)
-    let mut sm = chanlun_lean_lib::detect_second_buy_markers(strokes, segs, bigs, sups);
-    sm.extend(chanlun_lean_lib::detect_second_sell_markers(strokes, segs, bigs, sups));
-    let tm = chanlun_lean_lib::zhongshu::detect_bigseg_third_marks(sups, bigs, segs, strokes, &zs, highs, lows);
-    // 2+N买/卖
-    let (blc1, db) = guidao::calc_bigseg_lower_band_case1(bigs, segs, strokes);
-    let (buc1, ub) = guidao::calc_bigseg_upper_band_case1(bigs, segs, strokes);
-    let mut pm = guidao::detect_bigseg_cf_buy_markers(sups, bigs, segs, strokes, &blc1, &db, &ub);
-    pm.extend(guidao::detect_bigseg_cf_sell_markers(sups, bigs, segs, strokes, &buc1, &ub, &db));
-    // 撤回过滤: 标记输出=过滤后标记
-    let rf = guidao::apply_sup_retreat_filter(sups, bigs, segs, strokes, sm, tm, pm);
-    (rf.second_markers, rf.third_markers)
+    // 高级段买卖点检测
+    let mut ssm = chanlun_lean_lib::detect_superior_second_buy_markers(strokes, segs, bigs, sups);
+    ssm.extend(chanlun_lean_lib::detect_superior_second_sell_markers(strokes, segs, bigs, sups));
+    let mut spm = chanlun_lean_lib::detect_superior_cf_buy_markers(strokes, segs, bigs, sups);
+    spm.extend(chanlun_lean_lib::detect_superior_cf_sell_markers(strokes, segs, bigs, sups));
+    let szs = chanlun_lean_lib::zhongshu::detect_superior_zhongshus(strokes, segs, bigs, sups);
+    let stm = chanlun_lean_lib::zhongshu::detect_superior_third_marks(sups, bigs, segs, strokes, &szs, highs, lows);
+    // 高高级段级撤回 (输出 = 撤回后标记)
+    let sup_ret = chanlun_lean_lib::zhongshu::apply_sup2_retreat_filter(sups, bigs, segs, strokes, ssm, stm, spm);
+    (sup_ret.superior_second_markers, sup_ret.superior_third_markers, sup_ret.superior_plus_markers)
 }
 
 /// 初始化管线 — 传入全量 K 线数据, 内部缓存计算结果
@@ -146,6 +188,7 @@ pub unsafe extern "system" fn chanlun_init(
     let _pipeline = get_pipeline(h, l);
 
     unsafe { MARKERS_COMPUTED = false; }
+    unsafe { SUPERIOR_MARKERS_COMPUTED = false; }
     unsafe { ZHONGSHUS_COMPUTED = false; }
 
     1 // 成功
@@ -234,21 +277,62 @@ fn ensure_markers_computed() {
         if MARKERS_COMPUTED { return; }
     }
     let pipeline = match get_cached_pipeline() { Some(p) => p, None => return };
-    let (sm, tm) = build_markers(
+    let levels = chanlun_lean_lib::StrokeCases::from_param(TL_CASES.with(|c| c.borrow().1));
+    let (sm, tm, pm, fm) = build_big_markers(
         &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
-        &pipeline.strokes, &pipeline.highs, &pipeline.lows,
+        &pipeline.strokes, &pipeline.highs, &pipeline.lows, levels,
     );
-    let mut out: Vec<(usize, u8, f64)> = Vec::new();
-    for m in sm { out.push((m.bar_index, if m.is_buy { 0 } else { 1 }, m.price)); }
-    for m in tm { out.push((m.bar_index, if m.is_buy { 2 } else { 3 }, m.price)); }
-    out.sort_by_key(|&(b, k, _)| (b, k));
+    let mut out: Vec<(usize, u8, f64, i32)> = Vec::new();
+    for m in sm { out.push((m.bar_index, if m.is_buy { 0 } else { 1 }, m.price, 0)); }
+    for m in tm { out.push((m.bar_index, if m.is_buy { 2 } else { 3 }, m.price, 0)); }
+    // 大2+N买/卖 (细分 order; 2+5 起不输出文字标记)
+    for m in pm {
+        if m.order > 4 { continue; }
+        out.push((m.bar_index, if m.is_buy { 4 } else { 5 }, m.price, m.order as i32));
+    }
+    // 大一买/大一卖 (独立检测不套撤回)
+    for m in fm { out.push((m.bar_index, if m.is_buy { 6 } else { 7 }, m.price, 0)); }
+    out.sort_by_key(|&(b, k, _, _)| (b, k));
     unsafe {
         MARKERS_CACHE = out;
         MARKERS_COMPUTED = true;
     }
 }
 
-/// 二买/二卖/三买/三卖 标记总数
+fn ensure_superior_markers_computed() {
+    unsafe {
+        if SUPERIOR_MARKERS_COMPUTED { return; }
+    }
+    let pipeline = match get_cached_pipeline() { Some(p) => p, None => return };
+    let (ssm, stm, spm) = build_superior_markers(
+        &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
+        &pipeline.strokes, &pipeline.highs, &pipeline.lows,
+    );
+    let mut out: Vec<(usize, u8, f64, i32)> = Vec::new();
+    for m in ssm { out.push((m.bar_index, if m.is_buy { 0 } else { 1 }, m.price, 0)); }
+    // 高2+N买/卖 (细分 order; 高2+5 起不输出文字标记)
+    for m in spm {
+        if m.order > 4 { continue; }
+        out.push((m.bar_index, if m.is_buy { 2 } else { 3 }, m.price, m.order as i32));
+    }
+    for m in stm { out.push((m.bar_index, if m.is_buy { 4 } else { 5 }, m.price, 0)); }
+    // 高一买/高一卖 (独立检测不套撤回)
+    let lvl = chanlun_lean_lib::StrokeCases::from_param(TL_CASES.with(|c| c.borrow().1));
+    let mut fms = chanlun_lean_lib::zhongshu::detect_superior_first_buy_markers(
+        &pipeline.strokes, &pipeline.segments, &pipeline.big_segments, &pipeline.superior_segments, lvl,
+    );
+    fms.extend(chanlun_lean_lib::zhongshu::detect_superior_first_sell_markers(
+        &pipeline.strokes, &pipeline.segments, &pipeline.big_segments, &pipeline.superior_segments, lvl,
+    ));
+    for m in fms { out.push((m.bar_index, if m.is_buy { 6 } else { 7 }, m.price, 0)); }
+    out.sort_by_key(|&(b, k, _, _)| (b, k));
+    unsafe {
+        SUPERIOR_MARKERS_CACHE = out;
+        SUPERIOR_MARKERS_COMPUTED = true;
+    }
+}
+
+/// 大段买卖点标记总数
 ///
 /// MQL4 调用: int chanlun_markers_compute();
 #[export_name = "chanlun_markers_compute"]
@@ -257,16 +341,44 @@ pub unsafe extern "system" fn chanlun_markers_compute() -> c_int {
     unsafe { MARKERS_CACHE.len() as c_int }
 }
 
-/// 获取标记 (按bar排序): kind 0=二买 1=二卖 2=三买 3=三卖, price = 标记价格(文字定位)
+/// 获取标记 (按bar排序): kind 0=二买 1=二卖 2=三买 3=三卖 4/5=2+N买/卖(order细分) 6/7=一买/一卖
 ///
-/// MQL4 调用: double chanlun_markers_get(int index, int &bar, int &kind);
+/// MQL4 调用: double chanlun_markers_get(int index, int &bar, int &kind, int &order);
 #[export_name = "chanlun_markers_get"]
-pub unsafe extern "system" fn chanlun_markers_get(index: c_int, bar: *mut c_int, kind: *mut c_int) -> f64 {
+pub unsafe extern "system" fn chanlun_markers_get(index: c_int, bar: *mut c_int, kind: *mut c_int, order: *mut c_int) -> f64 {
     unsafe {
         if (index as usize) < MARKERS_CACHE.len() {
-            let (b, k, price) = MARKERS_CACHE[index as usize];
+            let (b, k, price, o) = MARKERS_CACHE[index as usize];
             if !bar.is_null() { *bar = b as c_int; }
             if !kind.is_null() { *kind = k as c_int; }
+            if !order.is_null() { *order = o; }
+            return price;
+        }
+    }
+    if !bar.is_null() { unsafe { *bar = -1; } }
+    0.0
+}
+
+/// 高级段买卖点标记总数 (高二买/高二卖/高2+N/高三买/高3卖/高一买/高一卖)
+///
+/// MQL4 调用: int chanlun_superior_markers_compute();
+#[export_name = "chanlun_superior_markers_compute"]
+pub unsafe extern "system" fn chanlun_superior_markers_compute() -> c_int {
+    ensure_superior_markers_computed();
+    unsafe { SUPERIOR_MARKERS_CACHE.len() as c_int }
+}
+
+/// 获取高级段买卖点标记: kind 0=高二买 1=高二卖 2/3=高2+N买/卖(order细分) 4/5=高三买/高3卖 6/7=高一买/高一卖
+///
+/// MQL4 调用: double chanlun_superior_markers_get(int index, int &bar, int &kind, int &order);
+#[export_name = "chanlun_superior_markers_get"]
+pub unsafe extern "system" fn chanlun_superior_markers_get(index: c_int, bar: *mut c_int, kind: *mut c_int, order: *mut c_int) -> f64 {
+    unsafe {
+        if (index as usize) < SUPERIOR_MARKERS_CACHE.len() {
+            let (b, k, price, o) = SUPERIOR_MARKERS_CACHE[index as usize];
+            if !bar.is_null() { *bar = b as c_int; }
+            if !kind.is_null() { *kind = k as c_int; }
+            if !order.is_null() { *order = o; }
             return price;
         }
     }
