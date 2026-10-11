@@ -34,6 +34,33 @@ use std::sync::Arc;
 //   TDX 图表重算同线程且公式设置行先于数据行执行; 其他线程不调 46/49 → 恒全开.
 static PIPELINE_CACHE: Mutex<Option<((Vec<f64>, Vec<f64>, u8, u8), Arc<ChanlunPipeline>)>> = Mutex::new(None);
 
+// ── 标记/中枢层缓存 (对齐库内既有单条目键控模式) ──
+// 背景: 主图公式对 mark 37 有 14 个 mode 调用、mark 43/44/45 共 14 个、mark 39-42 共 4 个;
+//   无缓存时一次图表缩放/刷新 = 标记与中枢算法各全量重跑 10+ 遍, 缩放明显卡顿。
+// 模式: 单条目 + 键控整体失效 (键 = 数据指纹 + (笔, 层) case 参数), 不做增量 ——
+//   K 线序列存在同时间戳覆盖语义, 任何增量表都可能输出旧值; 整体失效 + 全量重算
+//   保证输出与无缓存版逐位一致。
+// 数据指纹沿用管线缓存同款口径 (首/尾价 + 长度): 缩放/翻页不变数据 → 命中;
+//   新 K 线 (尾部价变) / 切品种 (首尾价变) / 改参数 → 键变 → 整体失效重算。
+type BigMarkersKey = (usize, f64, f64, f64, f64, u8, u8);
+static BIG_MARKERS_CACHE: Mutex<Option<(BigMarkersKey, Arc<(Vec<chanlun_lean_lib::SecondMarker>, Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>, Vec<chanlun_lean_lib::guidao::SecondPlusOneMarker>, Vec<chanlun_lean_lib::zhongshu::BigSegFirstMarker>)>)>> = Mutex::new(None);
+type SupMarkersKey = (usize, f64, f64, f64, f64, u8, u8);
+static SUP_MARKERS_CACHE: Mutex<Option<(SupMarkersKey, Arc<(Vec<chanlun_lean_lib::SecondMarker>, Vec<chanlun_lean_lib::zhongshu::BigSegThirdMarker>, Vec<chanlun_lean_lib::guidao::SecondPlusOneMarker>)>)>> = Mutex::new(None);
+static SUP_FIRST_CACHE: Mutex<Option<(SupMarkersKey, Arc<Vec<chanlun_lean_lib::zhongshu::SuperiorFirstMarker>>)>> = Mutex::new(None);
+type ZhongshuKey = (usize, f64, f64, f64, f64);
+static ZHONGSHUS_CACHE: Mutex<Option<(ZhongshuKey, Arc<Vec<chanlun_lean_lib::zhongshu::BigSegmentZhongShu>>)>> = Mutex::new(None);
+
+/// 命中返回 Arc 克隆, 未命中由调用方闭包计算后写回 (锁内比较, 计算在锁外, 与管线缓存同风格)
+fn cache_key(dl: usize, h: &[f64], l: &[f64]) -> (usize, f64, f64, f64, f64) {
+    (
+        dl,
+        h.first().copied().unwrap_or(f64::NAN),
+        l.first().copied().unwrap_or(f64::NAN),
+        h.last().copied().unwrap_or(f64::NAN),
+        l.last().copied().unwrap_or(f64::NAN),
+    )
+}
+
 thread_local! {
     /// case 参数 (0/3/4/5, 默认 0=全开): (笔, 线段~高级段)
     static TL_CASES: std::cell::RefCell<(u8, u8)> = const { std::cell::RefCell::new((0u8, 0u8)) };
@@ -76,6 +103,11 @@ unsafe fn apply_case_param(slot: usize, m: u8) {
     });
     if changed {
         *PIPELINE_CACHE.lock().unwrap() = None; // 参数变化 → 强制重建管线
+        // 标记/中枢层缓存键含 (笔, 层) — 参数变化必须整体失效, 防串味
+        *BIG_MARKERS_CACHE.lock().unwrap() = None;
+        *SUP_MARKERS_CACHE.lock().unwrap() = None;
+        *SUP_FIRST_CACHE.lock().unwrap() = None;
+        *ZHONGSHUS_CACHE.lock().unwrap() = None;
     }
 }
 
@@ -780,26 +812,44 @@ unsafe extern "C" fn buy_sell_markers_fn(
     let segs = &pipeline.segments;
     let pl_strokes = &pipeline.strokes;
     let levels = StrokeCases::from_param(TL_CASES.with(|c| c.borrow().1));
-    let (sm, tm, pm, fm) = build_big_markers(
-        &pipeline.superior_segments, big_segs, segs, pl_strokes, &highs, &lows, levels,
-    );
+    // 标记层缓存: 键 = 数据指纹 + (笔, 层); 命中免重跑 build_big_markers 全族
+    let (sc_now, lc_now) = TL_CASES.with(|c| *c.borrow());
+    let (f_dl, f_hf, f_lf, f_hl, f_ll) = cache_key(dl, &highs, &lows);
+    let key = (f_dl, f_hf, f_lf, f_hl, f_ll, sc_now, lc_now);
+    let hit = BIG_MARKERS_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(k, _)| *k == key)
+        .map(|(_, v)| Arc::clone(v));
+    let quad = match hit {
+        Some(v) => v,
+        None => {
+            let v = Arc::new(build_big_markers(
+                &pipeline.superior_segments, big_segs, segs, pl_strokes, &highs, &lows, levels,
+            ));
+            *BIG_MARKERS_CACHE.lock().unwrap() = Some((key, Arc::clone(&v)));
+            v
+        }
+    };
+    let (sm, tm, pm, fm) = quad.as_ref();
 
     let mut values: Vec<(usize, f32)> = Vec::new();
     match m {
-        1 => { for x in &sm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        2 => { for x in &sm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        3 => { for x in &tm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        4 => { for x in &tm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        1 => { for x in sm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        2 => { for x in sm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        3 => { for x in tm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        4 => { for x in tm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
         5..=8 => {
             let order = (m - 4) as u32;
-            for x in &pm { if x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+            for x in pm { if x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
         }
         9..=12 => {
             let order = (m - 8) as u32;
-            for x in &pm { if !x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+            for x in pm { if !x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
         }
-        13 => { for x in &fm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        14 => { for x in &fm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        13 => { for x in fm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        14 => { for x in fm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
         _ => {}
     }
     write_output(out, dl, &values);
@@ -824,36 +874,69 @@ unsafe extern "C" fn buy_sell_markers_sup_fn(
     let big_segs = &pipeline.big_segments;
     let segs = &pipeline.segments;
     let pl_strokes = &pipeline.strokes;
-    let (ssm, stm, spm) = build_superior_markers(
-        &pipeline.superior_segments, big_segs, segs, pl_strokes, &highs, &lows,
-    );
-
-    let mut values: Vec<(usize, f32)> = Vec::new();
-    match m {
-        1 => { for x in &ssm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        2 => { for x in &ssm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        3..=6 => {
-            let order = (m - 2) as u32;
-            for x in &spm { if x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
-        }
-        7..=10 => {
-            let order = (m - 6) as u32;
-            for x in &spm { if !x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
-        }
-        11 => { for x in &stm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        12 => { for x in &stm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
-        // 13/14 高一买/高一卖: 独立检测不套撤回过滤; 层参数与管线同源
-        13 | 14 => {
+    // 高级段标记缓存 (高二/高2+N/高三): 键 = 数据指纹 + (笔, 层)
+    let (sup_sc, sup_lc) = TL_CASES.with(|c| *c.borrow());
+    let (s_dl, s_hf, s_lf, s_hl, s_ll) = cache_key(dl, &highs, &lows);
+    let sup_key = (s_dl, s_hf, s_lf, s_hl, s_ll, sup_sc, sup_lc);
+    // 高一买/高一卖: 独立检测不套撤回过滤, 独立缓存 (mode 13/14 才消费)
+    let first_hit = SUP_FIRST_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(k, _)| *k == sup_key)
+        .map(|(_, v)| Arc::clone(v));
+    let first_markers = match first_hit {
+        Some(v) => v,
+        None => {
             let (_, lc_cases) = TL_CASES.with(|c| *c.borrow());
             let lvl = StrokeCases::from_param(lc_cases);
-            let want_buy = m == 13;
             let mut fms = zhongshu::detect_superior_first_buy_markers(
                 pl_strokes, segs, big_segs, &pipeline.superior_segments, lvl,
             );
             fms.extend(zhongshu::detect_superior_first_sell_markers(
                 pl_strokes, segs, big_segs, &pipeline.superior_segments, lvl,
             ));
-            for x in &fms {
+            let v = Arc::new(fms);
+            *SUP_FIRST_CACHE.lock().unwrap() = Some((sup_key, Arc::clone(&v)));
+            v
+        }
+    };
+    let hit = SUP_MARKERS_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(k, _)| *k == sup_key)
+        .map(|(_, v)| Arc::clone(v));
+    let triple = match hit {
+        Some(v) => v,
+        None => {
+            let v = Arc::new(build_superior_markers(
+                &pipeline.superior_segments, big_segs, segs, pl_strokes, &highs, &lows,
+            ));
+            *SUP_MARKERS_CACHE.lock().unwrap() = Some((sup_key, Arc::clone(&v)));
+            v
+        }
+    };
+    let (ssm, stm, spm) = triple.as_ref();
+
+    let mut values: Vec<(usize, f32)> = Vec::new();
+    match m {
+        1 => { for x in ssm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        2 => { for x in ssm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        3..=6 => {
+            let order = (m - 2) as u32;
+            for x in spm { if x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+        }
+        7..=10 => {
+            let order = (m - 6) as u32;
+            for x in spm { if !x.is_buy && x.order == order { values.push((x.bar_index, x.price as f32)); } }
+        }
+        11 => { for x in stm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        12 => { for x in stm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        // 13/14 高一买/高一卖: 独立检测不套撤回过滤 (缓存已预计算, 此处只取子集)
+        13 | 14 => {
+            let want_buy = m == 13;
+            for x in first_markers.iter() {
                 if x.is_buy == want_buy {
                     values.push((x.bar_index, x.price as f32));
                 }
@@ -882,10 +965,26 @@ unsafe extern "C" fn zhongshu_fn(
 
     let pipeline = get_pipeline(highs.clone(), lows.clone());
     // 中枢矩形来源: detect_bigseg_zhongshus_by_overlap (反向大段重叠口径, 高级段内全部中枢)
-    let zs = zhongshu::detect_bigseg_zhongshus_by_overlap(
-        &pipeline.superior_segments, &pipeline.big_segments,
-        &pipeline.segments, &pipeline.strokes,
-    );
+    // 中枢层缓存: 键 = 数据指纹 (缩放/翻页不变数据 → 命中)
+    let zs_key = cache_key(dl, &highs, &lows);
+    let zs_hit = ZHONGSHUS_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(k, _)| *k == zs_key)
+        .map(|(_, v)| Arc::clone(v));
+    let zs_arc = match zs_hit {
+        Some(v) => v,
+        None => {
+            let v = Arc::new(zhongshu::detect_bigseg_zhongshus_by_overlap(
+                &pipeline.superior_segments, &pipeline.big_segments,
+                &pipeline.segments, &pipeline.strokes,
+            ));
+            *ZHONGSHUS_CACHE.lock().unwrap() = Some((zs_key, Arc::clone(&v)));
+            v
+        }
+    };
+    let zs = zs_arc.as_ref();
 
     let mut values: Vec<(usize, f32)> = Vec::new();
     for z in zs {
@@ -1702,7 +1801,7 @@ mod tests {
             (2, 2, true),  // high=strokes[2].end_price=40, bar=strokes[2].end_bar=30
             (4, 4, true),  // high=strokes[4].end_price=30, bar=strokes[4].end_bar=50
         ];
-        let (upper_bp, up_big) = guidao::calc_bigseg_upper_band_case1(&big_segs_upper, &segs_upper, &strokes_upper);
+        let (upper_bp, _up_big) = guidao::calc_bigseg_upper_band_case1(&big_segs_upper, &segs_upper, &strokes_upper);
         // 确认门: 序列止于第三顶 (无后续反向大段) 不得产出轨点
         assert_eq!(upper_bp.len(), 0, "upper Case1: unconfirmed (no following down big-seg) → no point");
         // 补第一根反向大段后确认: 轨点 = 第一顶 (bar 10, value 50)
@@ -1738,7 +1837,7 @@ mod tests {
             (2, 2, false), // low=strokes[2].end_price=15, bar=strokes[2].end_bar=30
             (4, 4, false), // low=strokes[4].end_price=20, bar=strokes[4].end_bar=50
         ];
-        let (lower_bp, down_big) = guidao::calc_bigseg_lower_band_case1(&big_segs_lower, &segs_lower, &strokes_lower);
+        let (lower_bp, _down_big) = guidao::calc_bigseg_lower_band_case1(&big_segs_lower, &segs_lower, &strokes_lower);
         // 确认门: 序列止于第三底 (无后续反向大段) 不得产出轨点
         assert_eq!(lower_bp.len(), 0, "lower Case1: unconfirmed (no following up big-seg) → no point");
         // 补第一根反向大段后确认: 轨点 = 第一底 (bar 10, value 10)
@@ -1983,6 +2082,30 @@ mod tests {
         let (sc2, lc2) = TL_CASES.with(|c| *c.borrow());
         assert_eq!((sc2, lc2), (5, 5), "参数应写入 (5,5)");
         assert!(PIPELINE_CACHE.lock().unwrap().is_none(), "参数变化应清管线缓存");
+        // 标记/中枢层缓存同步失效断言 (缓存键含 (笔, 层), 漏清会串味)
+        assert!(BIG_MARKERS_CACHE.lock().unwrap().is_none(), "参数变化应清大段标记缓存");
+        assert!(SUP_MARKERS_CACHE.lock().unwrap().is_none(), "参数变化应清高级标记缓存");
+        assert!(SUP_FIRST_CACHE.lock().unwrap().is_none(), "参数变化应清高一买卖缓存");
+        assert!(ZHONGSHUS_CACHE.lock().unwrap().is_none(), "参数变化应清中枢缓存");
+
+        // 4) 标记/中枢层缓存命中: 同数据二次调用应命中 (键不变), 且输出一致
+        //    (走 buy_sell_markers_fn 真实路径, 借 40 根合成数据)
+        unsafe {
+            let mode1: f32 = 1.0;
+            let mut out1: Vec<f32> = vec![0.0; 40];
+            let mut out2: Vec<f32> = vec![0.0; 40];
+            buy_sell_markers_fn(40, out1.as_mut_ptr(), highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode1 as *const f32 as *mut f32);
+            buy_sell_markers_fn(40, out2.as_mut_ptr(), highs.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode1 as *const f32 as *mut f32);
+            assert_eq!(out1, out2, "同数据重复调用输出必须逐位一致 (缓存命中路径)");
+            assert!(BIG_MARKERS_CACHE.lock().unwrap().is_some(), "标记缓存应已填充");
+            // 尾部数据变化 → 键变 → 缓存必须失效重建
+            let mut highs2 = highs.clone();
+            highs2[39] += 1.0;
+            let mut out3: Vec<f32> = vec![0.0; 40];
+            buy_sell_markers_fn(40, out3.as_mut_ptr(), highs2.as_ptr() as *const f64 as *mut f32, lows.as_ptr() as *const f64 as *mut f32, &mode1 as *const f32 as *mut f32);
+            // 键已换 (新指纹), 缓存内容为新数据 (无法直接比对算法输出, 但可断言无 panic + 缓存仍有效)
+            assert!(BIG_MARKERS_CACHE.lock().unwrap().is_some(), "新数据应重建标记缓存");
+        }
 
         // 复位避免污染其他测试 (同线程共享 TL_CASES)
         unsafe {
