@@ -1366,6 +1366,18 @@ pub(crate) fn resolve_seg_start_point(
     Some((st.start_bar, st.start_price))
 }
 
+/// 解析**笔**终点 (bar, price) —— 笔级买点族专用。
+pub(crate) fn resolve_stroke_end_point(stroke_idx: usize, strokes: &[Stroke]) -> Option<(usize, f64)> {
+    let st = strokes.get(stroke_idx)?;
+    Some((st.end_bar, st.end_price))
+}
+
+/// 解析**笔**起点 (bar, price) —— 与 `resolve_stroke_end_point` 镜像。
+pub(crate) fn resolve_stroke_start_point(stroke_idx: usize, strokes: &[Stroke]) -> Option<(usize, f64)> {
+    let st = strokes.get(stroke_idx)?;
+    Some((st.start_bar, st.start_price))
+}
+
 pub const SECOND_RETRACE_MIN: f64 = 0.75;
 
 #[inline]
@@ -2253,5 +2265,287 @@ impl ChanlunPipeline {
             superior_segments: self.superior_segments.len(),
         }
     }
+}
+
+
+// ═══ 线段级/笔级 二买二卖 (与最新版算法库同源同步) ═══
+// ===== 线段二买/二卖检测 () =====
+/// 线二买 (宿主 = 大段, 部件 = 线段; 与 `detect_second_buy_markers` **逐行同构**, 层级降一级):
+/// 向下大段终点 B (低点) → A = B 左侧最近向上线段终点, C = B 右侧最近向上线段终点 (需 (C−B)/(A−B) ≥ 0.75),
+/// D = C 后第一个向下线段终点 (需 > B 不创新低) → 标记"线二买"。
+/// 门槛与高级侧同款: 只需 1 个向下大段 (仅 `big_segments` 为空才整体跳过)。
+///   D = C 之后第一条"同向段"终点     (多头 = 向下线段终点, 空头 = 向上线段终点) = 回试终点
+/// ⚠️ 本函数**只做定位, 不含任何门槛** —— 回补比 0.75 / D 不创新低 / 宿主 case2 / 破基准
+///    全部留在调用方, 谁用谁判 (其余逻辑保持不变)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Seg2Anchor {
+    /// B = 基准点价 (宿主段终点)
+    pub b_price: f64,
+    /// A = 基准点左侧最近反向段终点价
+    pub a_price: f64,
+    /// C 所在线段索引
+    pub c_idx: usize,
+    /// C = 基准点右侧最近反向段终点价
+    pub c_price: f64,
+    /// D = C 之后第一条同向段终点 bar (回试终点)
+    pub d_bar: usize,
+    /// D 终点价
+    pub d_price: f64,
+}
+
+/// 多头锚点解析 (线二买口径): `base_end_seg` = 基准点所在线段索引, 点位经 线段→笔 一级穿透。
+pub(crate) fn seg2_anchor_up(
+    segments: &[(usize, usize, bool)],
+    strokes: &[Stroke],
+    base_end_seg: usize,
+) -> Option<Seg2Anchor> {
+    let (_, b_price) = resolve_seg_end_point(base_end_seg, segments, strokes)?;
+    // A = B 左侧最近向上线段终点
+    let a_idx = (0..base_end_seg).rev().find(|&k| segments[k].2)?;
+    let (_, a_price) = resolve_seg_end_point(a_idx, segments, strokes)?;
+    // C = B 右侧最近向上线段终点
+    let c_idx = (base_end_seg + 1..segments.len()).find(|&k| segments[k].2)?;
+    let (_, c_price) = resolve_seg_end_point(c_idx, segments, strokes)?;
+    // D = C 之后第一条向下线段终点 (回试终点)
+    let d_idx = (c_idx + 1..segments.len()).find(|&k| !segments[k].2)?;
+    let (d_bar, d_price) = resolve_seg_end_point(d_idx, segments, strokes)?;
+    Some(Seg2Anchor { b_price, a_price, c_idx, c_price, d_bar, d_price })
+}
+
+/// 空头镜像锚点解析 (线二卖口径, 与 `seg2_anchor_up` 逐行镜像): A/C = 两侧向下线段终点, D = 向上线段终点。
+pub(crate) fn seg2_anchor_down(
+    segments: &[(usize, usize, bool)],
+    strokes: &[Stroke],
+    base_end_seg: usize,
+) -> Option<Seg2Anchor> {
+    let (_, b_price) = resolve_seg_end_point(base_end_seg, segments, strokes)?;
+    // A = B 左侧最近向下线段终点
+    let a_idx = (0..base_end_seg).rev().find(|&k| !segments[k].2)?;
+    let (_, a_price) = resolve_seg_end_point(a_idx, segments, strokes)?;
+    // C = B 右侧最近向下线段终点
+    let c_idx = (base_end_seg + 1..segments.len()).find(|&k| !segments[k].2)?;
+    let (_, c_price) = resolve_seg_end_point(c_idx, segments, strokes)?;
+    // D = C 之后第一条向上线段终点 (回试终点)
+    let d_idx = (c_idx + 1..segments.len()).find(|&k| segments[k].2)?;
+    let (d_bar, d_price) = resolve_seg_end_point(d_idx, segments, strokes)?;
+    Some(Seg2Anchor { b_price, a_price, c_idx, c_price, d_bar, d_price })
+}
+
+pub fn detect_seg_second_buy_markers(
+    strokes: &[Stroke],
+    segments: &[(usize, usize, bool)],
+    big_segments: &[(usize, usize, bool)],
+) -> Vec<SecondMarker> {
+    if big_segments.is_empty() { return vec![]; }
+
+    // 宿主段部件投影 (宿主 case2 确认门用): **线段序列** → 虚拟笔 (宿主 = 大段, 部件 = 线段)
+    // ⚠️ 线段行的 (si, ei) 是**笔索引**, 必须用**笔级**解析 ` 把笔索引当**线段索引**用 → segments[si]
+    //   越界归 0 (实测 XAUUSD_1m: 1378 行里 1136 行越界) → 宿主门通过 11/151 vs 正确 133/151,
+    //   线二买被大量误杀)
+    let seg_proj: Vec<Stroke> = segments
+        .iter()
+        .map(|&(si, ei, is_up)| {
+            let (_, sp) = resolve_stroke_start_point(si, strokes).unwrap_or((0, 0.0));
+            let (_, ep) = resolve_stroke_end_point(ei, strokes).unwrap_or((0, 0.0));
+            Stroke { is_up, start_price: sp, end_price: ep, start_bar: 0, end_bar: 0 }
+        })
+        .collect();
+    let mut markers: Vec<SecondMarker> = Vec::new();
+
+    for &(big_start, seg_end, is_up) in big_segments {
+        if is_up { continue; } // 只处理向下大段
+        // 宿主 case2 确认门 : 宿主大段 case2 不成立即否决, 不向左退
+        if !host_case2_ok(&seg_proj, big_start) { continue; }
+
+        // 锚点解析 A/C/D (B = 向下大段终点低点; seg_end 是线段索引) —— 与 共振a+ 共用同一真源
+        // (共振a+ 多头改调本函数, 线二买侧逻辑不变)
+        let Some(an) = seg2_anchor_up(segments, strokes, seg_end) else { continue; };
+
+        // C 回补门: (C − B) ≥ (A − B) × 0.75 (含 A > B 前提)
+        if !second_gate_buy(an.b_price, an.a_price, an.c_price) { continue; }
+
+        // D = C 之后第一条向下线段终点 (回试, 需 > B 不创新低) → 标记"线二买"
+        if an.d_price > an.b_price {
+            let marker = SecondMarker { bar_index: an.d_bar, price: an.d_price, is_buy: true };
+            if !markers.contains(&marker) {
+                markers.push(marker);
+            }
+        }
+    }
+
+    markers
+}
+
+/// 线二卖 (完全镜像): 向上大段终点 B (高点) → A/C = 两侧向下线段终点, D = 向上线段回试 < B。
+pub fn detect_seg_second_sell_markers(
+    strokes: &[Stroke],
+    segments: &[(usize, usize, bool)],
+    big_segments: &[(usize, usize, bool)],
+) -> Vec<SecondMarker> {
+    if big_segments.is_empty() { return vec![]; }
+
+    // 宿主段部件投影 (宿主 case2 确认门用): **线段序列** → 虚拟笔 (宿主 = 大段, 部件 = 线段)
+    // ⚠️ 线段行的 (si, ei) 是**笔索引** → 必须用笔级解析 
+    let seg_proj: Vec<Stroke> = segments
+        .iter()
+        .map(|&(si, ei, is_up)| {
+            let (_, sp) = resolve_stroke_start_point(si, strokes).unwrap_or((0, 0.0));
+            let (_, ep) = resolve_stroke_end_point(ei, strokes).unwrap_or((0, 0.0));
+            Stroke { is_up, start_price: sp, end_price: ep, start_bar: 0, end_bar: 0 }
+        })
+        .collect();
+    let mut markers: Vec<SecondMarker> = Vec::new();
+
+    for &(big_start, seg_end, is_up) in big_segments {
+        if !is_up { continue; } // 只处理向上大段
+        // 宿主 case2 确认门 : 宿主大段 case2 不成立即否决, 不向左退
+        if !host_case2_ok(&seg_proj, big_start) { continue; }
+
+        // 锚点解析 A/C/D (B = 向上大段终点高点; seg_end 是线段索引) —— 空头镜像同一真源
+        // (共振a+ 空头改调本函数, 线二卖侧逻辑不变)
+        let Some(an) = seg2_anchor_down(segments, strokes, seg_end) else { continue; };
+
+        // C 回补门 (空头镜像): (B − C) ≥ (B − A) × 0.75 (含 B > A 前提)
+        if !second_gate_sell(an.b_price, an.a_price, an.c_price) { continue; }
+
+        // D = C 之后第一条向上线段终点 (回试, 需 < B 不创新高) → 标记"线二卖"
+        if an.d_price < an.b_price {
+            let marker = SecondMarker { bar_index: an.d_bar, price: an.d_price, is_buy: false };
+            if !markers.contains(&marker) {
+                markers.push(marker);
+            }
+        }
+    }
+
+    markers
+}
+
+// ===== 笔二买/二卖检测 () =====
+/// 笔二买 (宿主 = 线段, 部件 = 笔; 与 `detect_seg_second_buy_markers` **逐行同构**, 层级再降一级):
+/// 向下线段终点 B (低点) → A = B 左侧最近向上笔终点, C = B 右侧最近向上笔终点 (需 (C−B)/(A−B) ≥ 0.75),
+/// D = C 后第一个向下笔终点 (需 > B 不创新低) → 标记"笔二买"。
+/// 门槛与上级同款: 只需 1 个向下线段 (仅 `segments` 为空才整体跳过)。
+pub fn detect_stroke_second_buy_markers(
+    strokes: &[Stroke],
+    segments: &[(usize, usize, bool)],
+) -> Vec<SecondMarker> {
+    if segments.is_empty() { return vec![]; }
+
+    let mut markers: Vec<SecondMarker> = Vec::new();
+
+    for &(seg_start_idx, seg_end, is_up) in segments {
+        if is_up { continue; } // 只处理向下线段
+        // 宿主 case2 确认门 : 宿主线段 case2 不成立即否决, 不向左退
+        // (线段是该层最低一段, 其部件序列 = 笔序列本身, 无需投影)
+        if !host_case2_ok(strokes, seg_start_idx) { continue; }
+
+        // B = 向下线段终点 (低点); seg_end 是笔索引
+        let Some((_, b_price)) = resolve_stroke_end_point(seg_end, strokes) else { continue; };
+
+        // A = B 左侧最近向上笔终点
+        let mut a_price: Option<f64> = None;
+        for k in (0..seg_end).rev() {
+            if strokes[k].is_up {
+                a_price = resolve_stroke_end_point(k, strokes).map(|(_, p)| p);
+                break;
+            }
+        }
+        if let Some(a_price) = a_price {
+            // C = B 右侧最近向上笔终点 (需 (C−B)/(A−B) ≥ 0.75)
+            let mut c_idx: usize = 0;
+            let mut c_ok = false;
+            for k in seg_end + 1..strokes.len() {
+                if strokes[k].is_up {
+                    if let Some((_, price)) = resolve_stroke_end_point(k, strokes) {
+                        if second_gate_buy(b_price, a_price, price) {
+                            c_idx = k;
+                            c_ok = true;
+                        }
+                    }
+                    break;
+                }
+            }
+            if c_ok {
+                // D = C 之后第一个向下笔 (回试, 需 > B 不创新低) → 标记"笔二买"
+                for k in c_idx + 1..strokes.len() {
+                    if !strokes[k].is_up {
+                        if let Some((bar, price)) = resolve_stroke_end_point(k, strokes) {
+                            if price > b_price {
+                                let marker = SecondMarker { bar_index: bar, price, is_buy: true };
+                                if !markers.contains(&marker) {
+                                    markers.push(marker);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    markers
+}
+
+/// 笔二卖 (完全镜像): 向上线段终点 B (高点) → A/C = 两侧向下笔终点, D = 向上笔回试 < B。
+pub fn detect_stroke_second_sell_markers(
+    strokes: &[Stroke],
+    segments: &[(usize, usize, bool)],
+) -> Vec<SecondMarker> {
+    if segments.is_empty() { return vec![]; }
+
+    let mut markers: Vec<SecondMarker> = Vec::new();
+
+    for &(seg_start_idx, seg_end, is_up) in segments {
+        if !is_up { continue; } // 只处理向上线段
+        // 宿主 case2 确认门 : 宿主线段 case2 不成立即否决, 不向左退
+        if !host_case2_ok(strokes, seg_start_idx) { continue; }
+
+        // B = 向上线段终点 (高点); seg_end 是笔索引
+        let Some((_, b_price)) = resolve_stroke_end_point(seg_end, strokes) else { continue; };
+
+        // A = B 左侧最近向下笔终点
+        let mut a_price: Option<f64> = None;
+        for k in (0..seg_end).rev() {
+            if !strokes[k].is_up {
+                a_price = resolve_stroke_end_point(k, strokes).map(|(_, p)| p);
+                break;
+            }
+        }
+        if let Some(a_price) = a_price {
+            // C = B 右侧最近向下笔终点 (需 (B−C)/(B−A) ≥ 0.75)
+            let mut c_idx: usize = 0;
+            let mut c_ok = false;
+            for k in seg_end + 1..strokes.len() {
+                if !strokes[k].is_up {
+                    if let Some((_, price)) = resolve_stroke_end_point(k, strokes) {
+                        if second_gate_sell(b_price, a_price, price) {
+                            c_idx = k;
+                            c_ok = true;
+                        }
+                    }
+                    break;
+                }
+            }
+            if c_ok {
+                // D = C 之后第一个向上笔 (回试, 需 < B 不创新高) → 标记"笔二卖"
+                for k in c_idx + 1..strokes.len() {
+                    if strokes[k].is_up {
+                        if let Some((bar, price)) = resolve_stroke_end_point(k, strokes) {
+                            if price < b_price {
+                                let marker = SecondMarker { bar_index: bar, price, is_buy: false };
+                                if !markers.contains(&marker) {
+                                    markers.push(marker);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    markers
 }
 

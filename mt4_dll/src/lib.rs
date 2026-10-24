@@ -291,15 +291,30 @@ fn ensure_markers_computed() {
         &pipeline.strokes, &pipeline.highs, &pipeline.lows, levels,
     );
     let mut out: Vec<(usize, u8, f64, i32)> = Vec::new();
-    for m in sm { out.push((m.bar_index, if m.is_buy { 0 } else { 1 }, m.price, 0)); }
-    for m in tm { out.push((m.bar_index, if m.is_buy { 2 } else { 3 }, m.price, 0)); }
+    for m in &sm { out.push((m.bar_index, if m.is_buy { 0 } else { 1 }, m.price, 0)); }
+    for m in &tm { out.push((m.bar_index, if m.is_buy { 2 } else { 3 }, m.price, 0)); }
     // 大2+N买/卖 (细分 order; 2+5 起不输出文字标记)
-    for m in pm {
+    for m in &pm {
         if m.order > 4 { continue; }
         out.push((m.bar_index, if m.is_buy { 4 } else { 5 }, m.price, m.order as i32));
     }
     // 大一买/大一卖 (独立检测不套撤回)
-    for m in fm { out.push((m.bar_index, if m.is_buy { 6 } else { 7 }, m.price, 0)); }
+    for m in &fm { out.push((m.bar_index, if m.is_buy { 6 } else { 7 }, m.price, 0)); }
+    // 大3+N买/卖: kind 8/9 + order=N, N<=4 截断 (3+5 起仅参与共振检测不出文字)
+    // 3N 检测 → 只留 order>=1 (order0 基准已在三买卖) → 3N 专用撤回 (撤回池 = 撤回后三族)
+    let big_3n = chanlun_lean_lib::zhongshu::bigseg_3n_marks_all_zhongshu(
+        &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
+        &pipeline.strokes, &pipeline.highs, &pipeline.lows,
+    );
+    let big_3n = chanlun_lean_lib::guidao::apply_sup_retreat_filter_3n(
+        &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
+        &pipeline.strokes, &sm, &tm, &pm,
+        big_3n.into_iter().filter(|m| m.order >= 1).collect(),
+    );
+    for m in big_3n {
+        if m.order > 4 { continue; }
+        out.push((m.bar_index, if m.is_buy { 8 } else { 9 }, m.price, m.order as i32));
+    }
     out.sort_by_key(|&(b, k, _, _)| (b, k));
     unsafe {
         MARKERS_CACHE = out;
@@ -317,13 +332,13 @@ fn ensure_superior_markers_computed() {
         &pipeline.strokes, &pipeline.highs, &pipeline.lows,
     );
     let mut out: Vec<(usize, u8, f64, i32)> = Vec::new();
-    for m in ssm { out.push((m.bar_index, if m.is_buy { 0 } else { 1 }, m.price, 0)); }
+    for m in &ssm { out.push((m.bar_index, if m.is_buy { 0 } else { 1 }, m.price, 0)); }
     // 高2+N买/卖 (细分 order; 高2+5 起不输出文字标记)
-    for m in spm {
+    for m in &spm {
         if m.order > 4 { continue; }
         out.push((m.bar_index, if m.is_buy { 2 } else { 3 }, m.price, m.order as i32));
     }
-    for m in stm { out.push((m.bar_index, if m.is_buy { 4 } else { 5 }, m.price, 0)); }
+    for m in &stm { out.push((m.bar_index, if m.is_buy { 4 } else { 5 }, m.price, 0)); }
     // 高一买/高一卖 (独立检测不套撤回)
     let lvl = chanlun_lean_lib::StrokeCases::from_param(TL_CASES.with(|c| c.borrow().1));
     let mut fms = chanlun_lean_lib::zhongshu::detect_superior_first_buy_markers(
@@ -333,6 +348,21 @@ fn ensure_superior_markers_computed() {
         &pipeline.strokes, &pipeline.segments, &pipeline.big_segments, &pipeline.superior_segments, lvl,
     ));
     for m in fms { out.push((m.bar_index, if m.is_buy { 6 } else { 7 }, m.price, 0)); }
+    // 高3+N买/卖: kind 8/9 + order=N, N<=4 截断同高2+N (3+5 起仅参与共振检测不出文字)
+    // 3N 检测 → 只留 order>=1 (order0 转正基准已在 stm) → 3N 专用撤回 (撤回池 = 撤回后三族)
+    let sup3n = chanlun_lean_lib::zhongshu::superior_3n_marks_all_zhongshu(
+        &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
+        &pipeline.strokes, &pipeline.highs, &pipeline.lows,
+    );
+    let sup3n = chanlun_lean_lib::zhongshu::apply_sup2_retreat_filter_3n(
+        &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
+        &pipeline.strokes, &ssm, &stm, &spm,
+        sup3n.into_iter().filter(|m| m.order >= 1).collect(),
+    );
+    for m in sup3n {
+        if m.order > 4 { continue; }
+        out.push((m.bar_index, if m.is_buy { 8 } else { 9 }, m.price, m.order as i32));
+    }
     out.sort_by_key(|&(b, k, _, _)| (b, k));
     unsafe {
         SUPERIOR_MARKERS_CACHE = out;

@@ -58,7 +58,9 @@ input int ChanlunBandDisplay = 0; // 1不显笔轨 / 2不显线轨 / 3不显大�
    int chanlun_get_bigseg_bands(double &upBuf[], double &downBuf[], double &midBuf[]);
    int chanlun_get_superior_segments(double &upBuf[], double &downBuf[]);
    int chanlun_markers_compute();
-   double chanlun_markers_get(int index, int &bar, int &kind);
+   double chanlun_markers_get(int index, int &bar, int &kind, int &order);
+   int chanlun_superior_markers_compute();
+   double chanlun_superior_markers_get(int index, int &bar, int &kind, int &order);
    int chanlun_zhongshus_compute();
    int chanlun_zhongshus_get(int index, int &start_bar, int &end_bar, double &zg, double &zd);
 #import
@@ -179,17 +181,43 @@ int OnCalculate(const int rates_total,
    for(int oi2 = ObjectsTotal()-1; oi2 >= 0; oi2--) { string on2 = ObjectName(oi2);
       if(StringFind(on2, "BM_") == 0) ObjectDelete(on2); }
    int mc = chanlun_markers_compute();
-   string bmNames[4] = {"二买", "二卖", "三买", "三卖"};
+   // kind: 0=二买 1=二卖 2=三买 3=三卖 4=2+N买 5=2+N卖 6=一买 7=一卖 8=3+N买 9=3+N卖
+   string bmNames[10] = {"二买", "二卖", "三买", "三卖", "2+N买", "2+N卖", "一买", "一卖", "3+N买", "3+N卖"};
    for(int mi = 0; mi < mc; mi++) {
-      int bar; int kind; double price = chanlun_markers_get(mi, bar, kind);
-      if(kind < 0 || kind > 3 || bar < 0 || bar >= rates_total) continue;
-      string bmName = "BM_" + IntegerToString(bar) + "_" + IntegerToString(kind);
+      int bar; int kind; int order;
+      double price = chanlun_markers_get(mi, bar, kind, order);
+      if(kind < 0 || kind > 9 || bar < 0 || bar >= rates_total) continue;
+      string txt = bmNames[kind];
+      if((kind == 4 || kind == 5) && order >= 1) txt = "2+" + IntegerToString(order) + (kind == 4 ? "买" : "卖");
+      if((kind == 8 || kind == 9) && order >= 1) txt = "3+" + IntegerToString(order) + (kind == 8 ? "买" : "卖");
+      string bmName = "BM_" + IntegerToString(bar) + "_" + IntegerToString(kind) + "_" + IntegerToString(order);
       ObjectCreate(0, bmName, OBJ_TEXT, 0, time[rates_total-1-bar], price);
-      ObjectSetString(0, bmName, OBJPROP_TEXT, bmNames[kind]);
-      bool isBuy = (kind == 0 || kind == 2);
+      ObjectSetString(0, bmName, OBJPROP_TEXT, txt);
+      bool isBuy = (kind == 0 || kind == 2 || kind == 4 || kind == 6 || kind == 8);
       ObjectSetInteger(0, bmName, OBJPROP_COLOR, isBuy ? clrRed : clrLime);
       ObjectSetInteger(0, bmName, OBJPROP_FONTSIZE, 10);
       ObjectSetInteger(0, bmName, OBJPROP_ANCHOR, isBuy ? ANCHOR_UPPER : ANCHOR_LOWER);
+   }
+   // ═══ 高级段买卖点文字标记 (高二买/高二卖/高2+N/高三买/高3卖/高一买/高一卖/高3+N) ═══
+   for(int oi3 = ObjectsTotal()-1; oi3 >= 0; oi3--) { string on3 = ObjectName(oi3);
+      if(StringFind(on3, "SM_") == 0) ObjectDelete(on3); }
+   int sc = chanlun_superior_markers_compute();
+   // kind: 0=高二买 1=高二卖 2=高2+N买 3=高2+N卖 4=高三买 5=高3卖 6=高一买 7=高一卖 8=高3+N买 9=高3+N卖
+   string smNames[10] = {"高二买", "高二卖", "高2+N买", "高2+N卖", "高三买", "高3卖", "高一买", "高一卖", "高3+N买", "高3+N卖"};
+   for(int si = 0; si < sc; si++) {
+      int bar; int kind; int order;
+      double price = chanlun_superior_markers_get(si, bar, kind, order);
+      if(kind < 0 || kind > 9 || bar < 0 || bar >= rates_total) continue;
+      string txt = smNames[kind];
+      if((kind == 2 || kind == 3) && order >= 1) txt = "高2+" + IntegerToString(order) + (kind == 2 ? "买" : "卖");
+      if((kind == 8 || kind == 9) && order >= 1) txt = "高3+" + IntegerToString(order) + (kind == 8 ? "买" : "卖");
+      string smName = "SM_" + IntegerToString(bar) + "_" + IntegerToString(kind) + "_" + IntegerToString(order);
+      ObjectCreate(0, smName, OBJ_TEXT, 0, time[rates_total-1-bar], price);
+      ObjectSetString(0, smName, OBJPROP_TEXT, txt);
+      bool isBuyS = (kind == 0 || kind == 2 || kind == 4 || kind == 6 || kind == 8);
+      ObjectSetInteger(0, smName, OBJPROP_COLOR, isBuyS ? clrRed : clrLime);
+      ObjectSetInteger(0, smName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, smName, OBJPROP_ANCHOR, isBuyS ? ANCHOR_UPPER : ANCHOR_LOWER);
    }
    ChartRedraw();
 

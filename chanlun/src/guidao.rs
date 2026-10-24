@@ -1,6 +1,6 @@
 //! 三级轨道系统 (笔/线段/大段 轨道与转信号) + 大段 2+N 买卖点 + 买点撤回过滤
 
-use crate::{Fractal, MergedCandle, process_merged_candles, resolve_sup_end_point, Stroke, SecondMarker};
+use crate::{Fractal, MergedCandle, process_merged_candles, resolve_seg_end_point, resolve_sup_end_point, Stroke, SecondMarker};
 use crate::zhongshu::BigSegThirdMarker;
 
 #[derive(Debug, Clone)]
@@ -1892,5 +1892,693 @@ pub fn apply_sup_retreat_filter(
         }
     }
     RetreatFilterResult { second_markers, third_markers, plus_markers, superior_second_markers }
+}
+
+
+// ═══ 线段级/笔级 2+N 买/卖 (宿主段 = 大段/线段, 部件 = 线段/笔) ═══
+// ===== 线段 2+N买/卖 + 线段买点撤回 () =====
+/// 线2+N买 (宿主 = 大段, 部件 = 线段; 与 `detect_bigseg_cf_buy_markers` **逐行同构**, 层级降一级):
+/// 检测点 = 向下大段终点; 其后首个三底背离组 (连续 3 个向下线段, 第3底>第1底 且 第2底>第1底) 的第三底 F,
+/// C = 检测点后首个向上线段终点 (需 > F) → 在 F 标记 线2+1买; 之后向下线段终点 X 满足
+/// min(U1,U2) > X > 检测点价且新向下大段未成立 → 线2+2, 线2+3, ...; 另含两处「初始数据特定情况」分支。
+///
+/// ⚠️ 与 `detect_bigseg_cf_buy_markers` 的差别: 不接收轨道参数 —— 该级判定本就是**序列直判**
+/// (与上级  严格对齐后的形态一致)。
+pub fn detect_seg_cf_buy_markers(
+    big_segments: &[(usize, usize, bool)],
+    segments: &[(usize, usize, bool)],
+    strokes: &[Stroke],
+) -> Vec<SecondPlusOneMarker> {
+    if big_segments.is_empty() { return vec![]; }
+
+    // 部件(线段)终点列表 (bar 升序)
+    let down_segs: Vec<(usize, f64)> = segments.iter().enumerate().filter(|(_, s)| !s.2)
+        .filter_map(|(i, _)| resolve_seg_end_point(i, segments, strokes)).collect();
+    let up_segs: Vec<(usize, f64)> = segments.iter().enumerate().filter(|(_, s)| s.2)
+        .filter_map(|(i, _)| resolve_seg_end_point(i, segments, strokes)).collect();
+
+    let mut markers: Vec<SecondPlusOneMarker> = Vec::new();
+    for (k, &(_, end_seg, is_up)) in big_segments.iter().enumerate() {
+        if is_up { continue; } // 只处理向下大段
+        // 检测点 = 向下大段终点 (低点)
+        let Some((dbe, d_price)) = resolve_seg_end_point(end_seg, segments, strokes) else { continue; };
+
+        // F = 检测点后首个三底背离组 (连续 3 个向下线段) 的第三底
+        let mut f: Option<(usize, f64)> = None;
+        for i in 2..down_segs.len() {
+            let (b0, l0) = down_segs[i - 2];
+            let (_b1, l1) = down_segs[i - 1];
+            let (b2, l2) = down_segs[i];
+            if b0 >= dbe && l2 > l0 && l1 > l0 {
+                f = Some((b2, l2));
+                break;
+            }
+        }
+        let Some((third_bar, f_price)) = f else { continue; };
+
+        // [窗口守卫] 三底第一底须落在 [检测点终点, 下一个同向(向下)大段终点) 窗口内
+        let next_down_big = big_segments[k + 1..].iter().find(|s| !s.2)
+            .and_then(|&(_, eb, _)| resolve_seg_end_point(eb, segments, strokes));
+        if let Some((nb, _)) = next_down_big {
+            if third_bar >= nb { continue; }
+        }
+
+        // C = 检测点后首个向上线段终点 (high)
+        let Some((_, c_price)) = up_segs.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
+        if c_price > f_price {
+            markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
+            // 2+N 递推: 参考高点 = min(U1, U2) 固定; 新向下大段终点 bar 为界
+            let second_up = up_segs.iter().filter(|(b, _)| *b > dbe).nth(1);
+            let ref_high = second_up.map(|(_, h)| c_price.min(*h));
+            if let Some(rh) = ref_high {
+                let mut order = 2;
+                for (xb, xl) in down_segs.iter().filter(|(b, _)| *b > third_bar) {
+                    if let Some((b, _)) = next_down_big {
+                        if *xb >= b { break; }
+                    }
+                    if rh > *xl && *xl > d_price {
+                        markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xl, is_buy: true, order });
+                        order += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体1: host 首段 UP 且起点 > 0 → 两类游离线段都作补充检测点 ──
+    if let Some(&(first_start, _, true)) = big_segments.first() {
+        if first_start > 0 {
+            let first_down_big_end = big_segments.iter().find(|s| !s.2)
+                .and_then(|&(_, eb, _)| resolve_seg_end_point(eb, segments, strokes));
+            for k in 0..first_start {
+                let Some((dbe, d_price)) = resolve_seg_end_point(k, segments, strokes) else { continue; };
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..down_segs.len() {
+                    let (b0, l0) = down_segs[i - 2];
+                    let (_b1, l1) = down_segs[i - 1];
+                    let (b2, l2) = down_segs[i];
+                    if b0 >= dbe && l2 > l0 && l1 > l0 {
+                        f = Some((b2, l2));
+                        break;
+                    }
+                }
+                let Some((third_bar, f_price)) = f else { continue; };
+                if let Some((nb, _)) = first_down_big_end {
+                    if third_bar >= nb { continue; }
+                }
+                let Some((_, c_price)) = up_segs.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
+                if c_price > f_price {
+                    markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
+                    let second_up = up_segs.iter().filter(|(b, _)| *b > dbe).nth(1);
+                    let ref_high = second_up.map(|(_, h)| c_price.min(*h));
+                    if let Some(rh) = ref_high {
+                        let mut order = 2;
+                        for (xb, xl) in down_segs.iter().filter(|(b, _)| *b > third_bar) {
+                            if let Some((b, _)) = first_down_big_end {
+                                if *xb >= b { break; }
+                            }
+                            if rh > *xl && *xl > d_price {
+                                markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xl, is_buy: true, order });
+                                order += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体2: host 首段 UP 且起点 == 0 (无游离段) → 数据入口 = 向上大段 case2 起点低点 ──
+    if let Some(&(first_start, _, true)) = big_segments.first() {
+        if first_start == 0 {
+            if let Some((dbe, d_price)) = crate::resolve_seg_start_point(big_segments[0].0, segments, strokes) {
+                let mut bottoms: Vec<(usize, f64)> = Vec::with_capacity(down_segs.len() + 1);
+                bottoms.push((dbe, d_price));
+                bottoms.extend(down_segs.iter().filter(|(b, _)| *b > dbe).copied());
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..bottoms.len() {
+                    let (b0, l0) = bottoms[i - 2];
+                    let (_b1, l1) = bottoms[i - 1];
+                    let (b2, l2) = bottoms[i];
+                    if b0 >= dbe && l2 > l0 && l1 > l0 {
+                        f = Some((b2, l2));
+                        break;
+                    }
+                }
+                if let Some((third_bar, f_price)) = f {
+                    let first_down_big_end = big_segments.iter().find(|s| !s.2)
+                        .and_then(|&(_, eb, _)| resolve_seg_end_point(eb, segments, strokes));
+                    let window_ok = match first_down_big_end {
+                        Some((nb, _)) => third_bar < nb,
+                        None => true,
+                    };
+                    if window_ok {
+                        let c = up_segs.iter().find(|(b, _)| *b > dbe).copied();
+                        if let Some((_, c_price)) = c {
+                            if c_price > f_price {
+                                markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
+                                let second_up = up_segs.iter().filter(|(b, _)| *b > dbe).nth(1);
+                                let ref_high = second_up.map(|(_, h)| c_price.min(*h));
+                                if let Some(rh) = ref_high {
+                                    let mut order = 2;
+                                    for (xb, xl) in down_segs.iter().filter(|(b, _)| *b > third_bar) {
+                                        if let Some((b, _)) = first_down_big_end {
+                                            if *xb >= b { break; }
+                                        }
+                                        if rh > *xl && *xl > d_price {
+                                            markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xl, is_buy: true, order });
+                                            order += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    markers
+}
+
+/// 线2+N卖 (**完全镜像**: 检测点 = 向上大段终点; F = 三顶背离第三顶; C'<F' → 线2+1卖;
+/// 之后向上线段终点 X 满足 max(C',C'+1) < X < 检测点价且新向上大段未成立 → 线2+2, 线2+3, ...)
+pub fn detect_seg_cf_sell_markers(
+    big_segments: &[(usize, usize, bool)],
+    segments: &[(usize, usize, bool)],
+    strokes: &[Stroke],
+) -> Vec<SecondPlusOneMarker> {
+    if big_segments.is_empty() { return vec![]; }
+
+    let down_segs: Vec<(usize, f64)> = segments.iter().enumerate().filter(|(_, s)| !s.2)
+        .filter_map(|(i, _)| resolve_seg_end_point(i, segments, strokes)).collect();
+    let up_segs: Vec<(usize, f64)> = segments.iter().enumerate().filter(|(_, s)| s.2)
+        .filter_map(|(i, _)| resolve_seg_end_point(i, segments, strokes)).collect();
+
+    let mut markers: Vec<SecondPlusOneMarker> = Vec::new();
+    for (k, &(_, end_seg, is_up)) in big_segments.iter().enumerate() {
+        if !is_up { continue; } // 只处理向上大段
+        let Some((ube, d_price)) = resolve_seg_end_point(end_seg, segments, strokes) else { continue; };
+
+        // F = 检测点后首个三顶背离组 (连续 3 个向上线段) 的第三顶
+        let mut f: Option<(usize, f64)> = None;
+        for i in 2..up_segs.len() {
+            let (b0, h0) = up_segs[i - 2];
+            let (_b1, h1) = up_segs[i - 1];
+            let (b2, h2) = up_segs[i];
+            if b0 >= ube && h2 < h0 && h1 < h0 {
+                f = Some((b2, h2));
+                break;
+            }
+        }
+        let Some((third_bar, f_price)) = f else { continue; };
+
+        let next_up_big = big_segments[k + 1..].iter().find(|s| s.2)
+            .and_then(|&(_, eb, _)| resolve_seg_end_point(eb, segments, strokes));
+        if let Some((nb, _)) = next_up_big {
+            if third_bar >= nb { continue; }
+        }
+
+        let Some((_, c_price)) = down_segs.iter().find(|(b, _)| *b > ube).copied() else { continue; };
+        if c_price < f_price {
+            markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
+            let second_down = down_segs.iter().filter(|(b, _)| *b > ube).nth(1);
+            let ref_low = second_down.map(|(_, l)| c_price.max(*l));
+            if let Some(rl) = ref_low {
+                let mut order = 2;
+                for (xb, xh) in up_segs.iter().filter(|(b, _)| *b > third_bar) {
+                    if let Some((b, _)) = next_up_big {
+                        if *xb >= b { break; }
+                    }
+                    if rl < *xh && *xh < d_price {
+                        markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xh, is_buy: false, order });
+                        order += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体1 卖镜像: host 首段 DOWN 且起点 > 0 ──
+    if let Some(&(first_start, _, false)) = big_segments.first() {
+        if first_start > 0 {
+            let first_up_big_end = big_segments.iter().find(|s| s.2)
+                .and_then(|&(_, eb, _)| resolve_seg_end_point(eb, segments, strokes));
+            for k in 0..first_start {
+                let Some((ube, d_price)) = resolve_seg_end_point(k, segments, strokes) else { continue; };
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..up_segs.len() {
+                    let (b0, h0) = up_segs[i - 2];
+                    let (_b1, h1) = up_segs[i - 1];
+                    let (b2, h2) = up_segs[i];
+                    if b0 >= ube && h2 < h0 && h1 < h0 {
+                        f = Some((b2, h2));
+                        break;
+                    }
+                }
+                let Some((third_bar, f_price)) = f else { continue; };
+                if let Some((nb, _)) = first_up_big_end {
+                    if third_bar >= nb { continue; }
+                }
+                let Some((_, c_price)) = down_segs.iter().find(|(b, _)| *b > ube).copied() else { continue; };
+                if c_price < f_price {
+                    markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
+                    let second_down = down_segs.iter().filter(|(b, _)| *b > ube).nth(1);
+                    let ref_low = second_down.map(|(_, l)| c_price.max(*l));
+                    if let Some(rl) = ref_low {
+                        let mut order = 2;
+                        for (xb, xh) in up_segs.iter().filter(|(b, _)| *b > third_bar) {
+                            if let Some((b, _)) = first_up_big_end {
+                                if *xb >= b { break; }
+                            }
+                            if rl < *xh && *xh < d_price {
+                                markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xh, is_buy: false, order });
+                                order += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体2 卖镜像: host 首段 DOWN 且起点 == 0 ──
+    if let Some(&(first_start, _, false)) = big_segments.first() {
+        if first_start == 0 {
+            if let Some((ube, d_price)) = crate::resolve_seg_start_point(big_segments[0].0, segments, strokes) {
+                let mut tops: Vec<(usize, f64)> = Vec::with_capacity(up_segs.len() + 1);
+                tops.push((ube, d_price));
+                tops.extend(up_segs.iter().filter(|(b, _)| *b > ube).copied());
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..tops.len() {
+                    let (b0, h0) = tops[i - 2];
+                    let (_b1, h1) = tops[i - 1];
+                    let (b2, h2) = tops[i];
+                    if b0 >= ube && h2 < h0 && h1 < h0 {
+                        f = Some((b2, h2));
+                        break;
+                    }
+                }
+                if let Some((third_bar, f_price)) = f {
+                    let first_up_big_end = big_segments.iter().find(|s| s.2)
+                        .and_then(|&(_, eb, _)| resolve_seg_end_point(eb, segments, strokes));
+                    let window_ok = match first_up_big_end {
+                        Some((nb, _)) => third_bar < nb,
+                        None => true,
+                    };
+                    if window_ok {
+                        let c = down_segs.iter().find(|(b, _)| *b > ube).copied();
+                        if let Some((_, c_price)) = c {
+                            if c_price < f_price {
+                                markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
+                                let second_down = down_segs.iter().filter(|(b, _)| *b > ube).nth(1);
+                                let ref_low = second_down.map(|(_, l)| c_price.max(*l));
+                                if let Some(rl) = ref_low {
+                                    let mut order = 2;
+                                    for (xb, xh) in up_segs.iter().filter(|(b, _)| *b > third_bar) {
+                                        if let Some((b, _)) = first_up_big_end {
+                                            if *xb >= b { break; }
+                                        }
+                                        if rl < *xh && *xh < d_price {
+                                            markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xh, is_buy: false, order });
+                                            order += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    markers
+}
+
+// ===== 笔2+N买/卖 + 笔级撤回过滤 () =====
+/// 笔2+N买 (宿主 = 线段, 部件 = 笔; 与 `detect_seg_cf_buy_markers` **逐行同构**, 层级再降一级):
+/// 检测点 = 向下线段终点; 其后首个三底背离组 (连续 3 个向下笔, 第3底>第1底 且 第2底>第1底) 的第三底 F,
+/// C = 检测点后首个向上笔终点 (需 > F) → 在 F 标记 笔2+1买; 之后向下笔终点 X 满足
+/// min(U1,U2) > X > 检测点价且新向下线段未成立 → 笔2+2, 笔2+3, ...; 另含两处「初始数据特定情况」分支。
+///
+/// ⚠️ 与 `detect_seg_cf_buy_markers` 同款: 不接收轨道参数 —— 该级判定本就是**序列直判**。
+pub fn detect_stroke_cf_buy_markers(
+    segments: &[(usize, usize, bool)],
+    strokes: &[Stroke],
+) -> Vec<SecondPlusOneMarker> {
+    if segments.is_empty() { return vec![]; }
+
+    // 部件(笔)终点列表 (bar 升序)
+    let down_parts: Vec<(usize, f64)> = strokes.iter().filter(|s| !s.is_up).map(|s| (s.end_bar, s.end_price)).collect();
+    let up_parts: Vec<(usize, f64)> = strokes.iter().filter(|s| s.is_up).map(|s| (s.end_bar, s.end_price)).collect();
+
+    let mut markers: Vec<SecondPlusOneMarker> = Vec::new();
+    for (k, &(_, part_end, is_up)) in segments.iter().enumerate() {
+        if is_up { continue; } // 只处理向下线段
+        // 检测点 = 向下线段终点 (低点)
+        let Some((dbe, d_price)) = crate::resolve_stroke_end_point(part_end, strokes) else { continue; };
+
+        // F = 检测点后首个三底背离组 (连续 3 个向下笔) 的第三底
+        let mut f: Option<(usize, f64)> = None;
+        for i in 2..down_parts.len() {
+            let (b0, l0) = down_parts[i - 2];
+            let (_b1, l1) = down_parts[i - 1];
+            let (b2, l2) = down_parts[i];
+            if b0 >= dbe && l2 > l0 && l1 > l0 {
+                f = Some((b2, l2));
+                break;
+            }
+        }
+        let Some((third_bar, f_price)) = f else { continue; };
+
+        // [窗口守卫] 三底第一底须落在 [检测点终点, 下一个同向(向下)线段终点) 窗口内
+        let next_down_seg = segments[k + 1..].iter().find(|s| !s.2)
+            .and_then(|&(_, eb, _)| crate::resolve_stroke_end_point(eb, strokes));
+        if let Some((nb, _)) = next_down_seg {
+            if third_bar >= nb { continue; }
+        }
+
+        // C = 检测点后首个向上笔终点 (high)
+        let Some((_, c_price)) = up_parts.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
+        if c_price > f_price {
+            markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
+            // 2+N 递推: 参考高点 = min(U1, U2) 固定; 新向下线段终点 bar 为界
+            let second_up = up_parts.iter().filter(|(b, _)| *b > dbe).nth(1);
+            let ref_high = second_up.map(|(_, h)| c_price.min(*h));
+            if let Some(rh) = ref_high {
+                let mut order = 2;
+                for (xb, xl) in down_parts.iter().filter(|(b, _)| *b > third_bar) {
+                    if let Some((b, _)) = next_down_seg {
+                        if *xb >= b { break; }
+                    }
+                    if rh > *xl && *xl > d_price {
+                        markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xl, is_buy: true, order });
+                        order += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体1: host 首段 UP 且起点 > 0 → 开头游离笔作补充检测点 ──
+    if let Some(&(first_start, _, true)) = segments.first() {
+        if first_start > 0 {
+            let first_down_seg_end = segments.iter().find(|s| !s.2)
+                .and_then(|&(_, eb, _)| crate::resolve_stroke_end_point(eb, strokes));
+            for k in 0..first_start {
+                let Some((dbe, d_price)) = crate::resolve_stroke_end_point(k, strokes) else { continue; };
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..down_parts.len() {
+                    let (b0, l0) = down_parts[i - 2];
+                    let (_b1, l1) = down_parts[i - 1];
+                    let (b2, l2) = down_parts[i];
+                    if b0 >= dbe && l2 > l0 && l1 > l0 {
+                        f = Some((b2, l2));
+                        break;
+                    }
+                }
+                let Some((third_bar, f_price)) = f else { continue; };
+                if let Some((nb, _)) = first_down_seg_end {
+                    if third_bar >= nb { continue; }
+                }
+                let Some((_, c_price)) = up_parts.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
+                if c_price > f_price {
+                    markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
+                    let second_up = up_parts.iter().filter(|(b, _)| *b > dbe).nth(1);
+                    let ref_high = second_up.map(|(_, h)| c_price.min(*h));
+                    if let Some(rh) = ref_high {
+                        let mut order = 2;
+                        for (xb, xl) in down_parts.iter().filter(|(b, _)| *b > third_bar) {
+                            if let Some((b, _)) = first_down_seg_end {
+                                if *xb >= b { break; }
+                            }
+                            if rh > *xl && *xl > d_price {
+                                markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xl, is_buy: true, order });
+                                order += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体2: host 首段 UP 且起点 == 0 (无游离笔) → 数据入口 = 向上线段 case2 起点低点 ──
+    if let Some(&(first_start, _, true)) = segments.first() {
+        if first_start == 0 {
+            if let Some((dbe, d_price)) = crate::resolve_stroke_start_point(segments[0].0, strokes) {
+                let mut bottoms: Vec<(usize, f64)> = Vec::with_capacity(down_parts.len() + 1);
+                bottoms.push((dbe, d_price));
+                bottoms.extend(down_parts.iter().filter(|(b, _)| *b > dbe).copied());
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..bottoms.len() {
+                    let (b0, l0) = bottoms[i - 2];
+                    let (_b1, l1) = bottoms[i - 1];
+                    let (b2, l2) = bottoms[i];
+                    if b0 >= dbe && l2 > l0 && l1 > l0 {
+                        f = Some((b2, l2));
+                        break;
+                    }
+                }
+                if let Some((third_bar, f_price)) = f {
+                    let first_down_seg_end = segments.iter().find(|s| !s.2)
+                        .and_then(|&(_, eb, _)| crate::resolve_stroke_end_point(eb, strokes));
+                    let window_ok = match first_down_seg_end {
+                        Some((nb, _)) => third_bar < nb,
+                        None => true,
+                    };
+                    if window_ok {
+                        if let Some((_, c_price)) = up_parts.iter().find(|(b, _)| *b > dbe).copied() {
+                            if c_price > f_price {
+                                markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
+                                let second_up = up_parts.iter().filter(|(b, _)| *b > dbe).nth(1);
+                                let ref_high = second_up.map(|(_, h)| c_price.min(*h));
+                                if let Some(rh) = ref_high {
+                                    let mut order = 2;
+                                    for (xb, xl) in down_parts.iter().filter(|(b, _)| *b > third_bar) {
+                                        if let Some((b, _)) = first_down_seg_end {
+                                            if *xb >= b { break; }
+                                        }
+                                        if rh > *xl && *xl > d_price {
+                                            markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xl, is_buy: true, order });
+                                            order += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    markers
+}
+
+/// 笔2+N卖 (**完全镜像**: 检测点 = 向上线段终点; F = 三顶背离第三顶; C'<F' → 笔2+1卖;
+/// 之后向上笔终点 X 满足 max(C',C'+1) < X < 检测点价且新向上线段未成立 → 笔2+2, 笔2+3, ...)
+pub fn detect_stroke_cf_sell_markers(
+    segments: &[(usize, usize, bool)],
+    strokes: &[Stroke],
+) -> Vec<SecondPlusOneMarker> {
+    if segments.is_empty() { return vec![]; }
+
+    let down_parts: Vec<(usize, f64)> = strokes.iter().filter(|s| !s.is_up).map(|s| (s.end_bar, s.end_price)).collect();
+    let up_parts: Vec<(usize, f64)> = strokes.iter().filter(|s| s.is_up).map(|s| (s.end_bar, s.end_price)).collect();
+
+    let mut markers: Vec<SecondPlusOneMarker> = Vec::new();
+    for (k, &(_, part_end, is_up)) in segments.iter().enumerate() {
+        if !is_up { continue; } // 只处理向上线段
+        let Some((ube, d_price)) = crate::resolve_stroke_end_point(part_end, strokes) else { continue; };
+
+        // F = 检测点后首个三顶背离组 (连续 3 个向上笔) 的第三顶
+        let mut f: Option<(usize, f64)> = None;
+        for i in 2..up_parts.len() {
+            let (b0, h0) = up_parts[i - 2];
+            let (_b1, h1) = up_parts[i - 1];
+            let (b2, h2) = up_parts[i];
+            if b0 >= ube && h2 < h0 && h1 < h0 {
+                f = Some((b2, h2));
+                break;
+            }
+        }
+        let Some((third_bar, f_price)) = f else { continue; };
+
+        let next_up_seg = segments[k + 1..].iter().find(|s| s.2)
+            .and_then(|&(_, eb, _)| crate::resolve_stroke_end_point(eb, strokes));
+        if let Some((nb, _)) = next_up_seg {
+            if third_bar >= nb { continue; }
+        }
+
+        let Some((_, c_price)) = down_parts.iter().find(|(b, _)| *b > ube).copied() else { continue; };
+        if c_price < f_price {
+            markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
+            let second_down = down_parts.iter().filter(|(b, _)| *b > ube).nth(1);
+            let ref_low = second_down.map(|(_, l)| c_price.max(*l));
+            if let Some(rl) = ref_low {
+                let mut order = 2;
+                for (xb, xh) in up_parts.iter().filter(|(b, _)| *b > third_bar) {
+                    if let Some((b, _)) = next_up_seg {
+                        if *xb >= b { break; }
+                    }
+                    if rl < *xh && *xh < d_price {
+                        markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xh, is_buy: false, order });
+                        order += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体1 卖镜像: host 首段 DOWN 且起点 > 0 ──
+    if let Some(&(first_start, _, false)) = segments.first() {
+        if first_start > 0 {
+            let first_up_seg_end = segments.iter().find(|s| s.2)
+                .and_then(|&(_, eb, _)| crate::resolve_stroke_end_point(eb, strokes));
+            for k in 0..first_start {
+                let Some((ube, d_price)) = crate::resolve_stroke_end_point(k, strokes) else { continue; };
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..up_parts.len() {
+                    let (b0, h0) = up_parts[i - 2];
+                    let (_b1, h1) = up_parts[i - 1];
+                    let (b2, h2) = up_parts[i];
+                    if b0 >= ube && h2 < h0 && h1 < h0 {
+                        f = Some((b2, h2));
+                        break;
+                    }
+                }
+                let Some((third_bar, f_price)) = f else { continue; };
+                if let Some((nb, _)) = first_up_seg_end {
+                    if third_bar >= nb { continue; }
+                }
+                let Some((_, c_price)) = down_parts.iter().find(|(b, _)| *b > ube).copied() else { continue; };
+                if c_price < f_price {
+                    markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
+                    let second_down = down_parts.iter().filter(|(b, _)| *b > ube).nth(1);
+                    let ref_low = second_down.map(|(_, l)| c_price.max(*l));
+                    if let Some(rl) = ref_low {
+                        let mut order = 2;
+                        for (xb, xh) in up_parts.iter().filter(|(b, _)| *b > third_bar) {
+                            if let Some((b, _)) = first_up_seg_end {
+                                if *xb >= b { break; }
+                            }
+                            if rl < *xh && *xh < d_price {
+                                markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xh, is_buy: false, order });
+                                order += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 初始数据特定情况·变体2 卖镜像: host 首段 DOWN 且起点 == 0 ──
+    if let Some(&(first_start, _, false)) = segments.first() {
+        if first_start == 0 {
+            if let Some((ube, d_price)) = crate::resolve_stroke_start_point(segments[0].0, strokes) {
+                let mut tops: Vec<(usize, f64)> = Vec::with_capacity(up_parts.len() + 1);
+                tops.push((ube, d_price));
+                tops.extend(up_parts.iter().filter(|(b, _)| *b > ube).copied());
+                let mut f: Option<(usize, f64)> = None;
+                for i in 2..tops.len() {
+                    let (b0, h0) = tops[i - 2];
+                    let (_b1, h1) = tops[i - 1];
+                    let (b2, h2) = tops[i];
+                    if b0 >= ube && h2 < h0 && h1 < h0 {
+                        f = Some((b2, h2));
+                        break;
+                    }
+                }
+                if let Some((third_bar, f_price)) = f {
+                    let first_up_seg_end = segments.iter().find(|s| s.2)
+                        .and_then(|&(_, eb, _)| crate::resolve_stroke_end_point(eb, strokes));
+                    let window_ok = match first_up_seg_end {
+                        Some((nb, _)) => third_bar < nb,
+                        None => true,
+                    };
+                    if window_ok {
+                        if let Some((_, c_price)) = down_parts.iter().find(|(b, _)| *b > ube).copied() {
+                            if c_price < f_price {
+                                markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
+                                let second_down = down_parts.iter().filter(|(b, _)| *b > ube).nth(1);
+                                let ref_low = second_down.map(|(_, l)| c_price.max(*l));
+                                if let Some(rl) = ref_low {
+                                    let mut order = 2;
+                                    for (xb, xh) in up_parts.iter().filter(|(b, _)| *b > third_bar) {
+                                        if let Some((b, _)) = first_up_seg_end {
+                                            if *xb >= b { break; }
+                                        }
+                                        if rl < *xh && *xh < d_price {
+                                            markers.push(SecondPlusOneMarker { bar_index: *xb, price: *xh, is_buy: false, order });
+                                            order += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    markers
+}
+
+// ═══ 大段级 3+N 专用撤回过滤 (自身 bar 计入候选池) ═══
+// ===== 大段 3+N买/卖 撤回过滤 () =====
+/// 大段 **3+N买/3+N卖** 的撤回过滤器 —— 与 [`apply_sup_retreat_filter`] 的**大段三买那一支逐行同构**
+/// （同一份窗口、同一个 `x` / `cut` / `eb`、同一套 retain 谓词），只是作用对象换成 3+N 家族。
+///
+/// 🔴 ** 修正**：`x` = 前驱区间内**最后一个买点**，
+///    必须把**3+N 自己的 bar 也算进候选池** —— 与「2+N买」同规（2+N 位于 `plus_markers`，
+///    本来就在池内）。此前漏算 ⇒ 当 3+N 恰好是区间内最晚的买点时，`x` 偏小、3+N 反而被自己的
+///    撤回规则删掉（欧美30m 2025-05-13 02:30 / 2025-06-19 14:30 两例即如此）。
+///    ⚠️ 本函数只对 3+N 列表做 retain ⇒ **不会改变 二买/三买/2+N 既有信号**。
+///
+/// ⚠️ 为什么单独一支而不改 `apply_sup_retreat_filter` 签名：后者有 ~110 个调用点，加参数会波及全仓。
+pub fn apply_sup_retreat_filter_3n(
+    sups: &[(usize, usize, bool)],
+    bigs: &[(usize, usize, bool)],
+    segs: &[(usize, usize, bool)],
+    strokes: &[Stroke],
+    second_markers: &[SecondMarker],
+    third_markers: &[BigSegThirdMarker],
+    plus_markers: &[SecondPlusOneMarker],
+    mut markers: Vec<crate::zhongshu::BigSeg3NMarker>,
+) -> Vec<crate::zhongshu::BigSeg3NMarker> {
+    // 买点撤回: 每个向下高级段成立 (索引>0 才有前驱向上高级段)
+    for d_idx in (1..sups.len()).filter(|&i| !sups[i].2) {
+        if let Some((sb, eb)) = sup_range(sups[d_idx - 1], bigs, segs, strokes) {
+            let mut buy_bars: Vec<usize> = Vec::new();
+            for m in second_markers.iter().filter(|m| m.is_buy) { buy_bars.push(m.bar_index); }
+            for m in third_markers.iter().filter(|m| m.is_buy) { buy_bars.push(m.bar_index); }
+            for m in plus_markers.iter().filter(|m| m.is_buy) { buy_bars.push(m.bar_index); }
+            // ★ 3+N 自己的 bar 也计入候选池 (与 2+N 同规; 见上方修正说明)
+            for m in markers.iter().filter(|m| m.is_buy) { buy_bars.push(m.bar_index); }
+            let cut = sup_range(sups[d_idx], bigs, segs, strokes).map(|(_, e)| e).unwrap_or(usize::MAX);
+            match buy_bars.into_iter().filter(|&b| sb <= b && b <= eb).max() {
+                Some(x) => markers.retain(|m| !m.is_buy || m.bar_index <= x || m.bar_index > cut),
+                None => markers.retain(|m| !m.is_buy || m.bar_index <= eb || m.bar_index > cut),
+            }
+        }
+    }
+    // 卖点镜像: 每个向上高级段成立 (索引>0) → 撤回到前驱向下高级段区间内最后卖点
+    for u_idx in (1..sups.len()).filter(|&i| sups[i].2) {
+        if let Some((sb, eb)) = sup_range(sups[u_idx - 1], bigs, segs, strokes) {
+            let mut sell_bars: Vec<usize> = Vec::new();
+            for m in second_markers.iter().filter(|m| !m.is_buy) { sell_bars.push(m.bar_index); }
+            for m in third_markers.iter().filter(|m| !m.is_buy) { sell_bars.push(m.bar_index); }
+            for m in plus_markers.iter().filter(|m| !m.is_buy) { sell_bars.push(m.bar_index); }
+            // ★ 3+N 自己的 bar 也计入候选池 (卖点镜像)
+            for m in markers.iter().filter(|m| !m.is_buy) { sell_bars.push(m.bar_index); }
+            let cut = sup_range(sups[u_idx], bigs, segs, strokes).map(|(_, e)| e).unwrap_or(usize::MAX);
+            match sell_bars.into_iter().filter(|&b| sb <= b && b <= eb).max() {
+                Some(x) => markers.retain(|m| m.is_buy || m.bar_index <= x || m.bar_index > cut),
+                None => markers.retain(|m| m.is_buy || m.bar_index <= eb || m.bar_index > cut),
+            }
+        }
+    }
+    markers
 }
 

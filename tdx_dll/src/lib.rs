@@ -6,9 +6,9 @@
 //!   TDXDLL3(编号, HIGH, LOW, mode)
 //!   编号1=分型, 2=笔, 3=线段, 4=大段, 35=高级段
 //!   轨道: 5-6=笔轨, 7-8=线段轨, 9-10=大段轨
-//!   37=大段买卖点文字 (mode 1=大二买 2=大二卖 3=大三买 4=大三卖;
+//!   37=大段买卖点文字 (mode 1=大二买 2=大二卖 3=大三买 4=大三卖; 15=大3+N买 16=大3+N卖;
 //!       5..8=大2+1~4买 9..12=大2+1~4卖; 13=大一买 14=大一卖)
-//!   43/44/45=高级段买卖点文字 (43: 1=高二买 2=高二卖 13=高一买 14=高一卖;
+//!   43/44/45=高级段买卖点文字 (43: 1=高二买 2=高二卖 13=高一买 14=高一卖; 45: 15=高3+N买 16=高3+N卖;
 //!       44: 3..6=高2+1~4买 7..10=高2+1~4卖; 45: 11=高三买 12=高3卖)
 //!   39=中枢ZG, 40=中枢ZD, 41=中枢开始标记, 42=中枢结束标记
 //!   46=设置笔 case 参数, 49=设置线段~高级段 case 参数 (mode: 0全开/3关case3/4关case4/5关case34)
@@ -798,6 +798,49 @@ fn build_superior_markers(
     (sup_ret.superior_second_markers, sup_ret.superior_third_markers, sup_ret.superior_plus_markers)
 }
 
+/// 大段 3+N买/3+N卖 显示集 (统计命名口径) —
+/// 检测 → 只留 order>=1 (order0 基准已在三买卖) → 3N 专用撤回 → N≤4 截断。
+fn bigseg_3n_display(
+    highs: &[f64],
+    lows: &[f64],
+    pipeline: &chanlun_lean_lib::ChanlunPipeline,
+    sm: &[chanlun_lean_lib::SecondMarker],
+    tm: &[chanlun_lean_lib::zhongshu::BigSegThirdMarker],
+    pm: &[chanlun_lean_lib::guidao::SecondPlusOneMarker],
+) -> Vec<chanlun_lean_lib::zhongshu::BigSeg3NMarker> {
+    let sups = &pipeline.superior_segments;
+    let bigs = &pipeline.big_segments;
+    let segs = &pipeline.segments;
+    let strokes = &pipeline.strokes;
+    let all = chanlun_lean_lib::zhongshu::bigseg_3n_marks_all_zhongshu(sups, bigs, segs, strokes, highs, lows);
+    let retained = chanlun_lean_lib::guidao::apply_sup_retreat_filter_3n(
+        sups, bigs, segs, strokes, sm, tm, pm,
+        all.into_iter().filter(|m| m.order >= 1).collect(),
+    );
+    retained.into_iter().filter(|m| m.order <= 4).collect()
+}
+
+/// 高级段 3+N买/3+N卖 显示集 (统计命名口径) —
+/// 检测 → 只留 order>=1 (order0 转正基准已在 stm) → 3N 专用撤回 → N≤4 截断。
+fn superior_3n_display(
+    pipeline: &chanlun_lean_lib::ChanlunPipeline,
+    ssm: &[chanlun_lean_lib::SecondMarker],
+    stm: &[chanlun_lean_lib::zhongshu::BigSegThirdMarker],
+    spm: &[chanlun_lean_lib::guidao::SecondPlusOneMarker],
+) -> Vec<chanlun_lean_lib::zhongshu::BigSeg3NMarker> {
+    let sups = &pipeline.superior_segments;
+    let bigs = &pipeline.big_segments;
+    let segs = &pipeline.segments;
+    let strokes = &pipeline.strokes;
+    let highs = &pipeline.highs;
+    let lows = &pipeline.lows;
+    let all = chanlun_lean_lib::zhongshu::superior_3n_marks_all_zhongshu(sups, bigs, segs, strokes, highs, lows);
+    let retained = chanlun_lean_lib::zhongshu::apply_sup2_retreat_filter_3n(
+        sups, bigs, segs, strokes, ssm, stm, spm,
+        all.into_iter().filter(|m| m.order >= 1).collect(),
+    );
+    retained.into_iter().filter(|m| m.order <= 4).collect()
+}
 // ── 大段买卖点文字标记 (mark 37) ──
 // mode 表 (append-only: 1-4 原义不变):
 //   1=大二买 2=大二卖 3=大三买 4=大三卖
@@ -858,6 +901,14 @@ unsafe extern "C" fn buy_sell_markers_fn(
         }
         13 => { for x in fm { if x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
         14 => { for x in fm { if !x.is_buy { values.push((x.bar_index, x.price as f32)); } } }
+        // 15/16: 大3+N买/卖 (统计命名, 一个 mode 输出该类全部 order>=1 点; N≤4 截断)
+        15 | 16 => {
+            let want_buy = m == 15;
+            let big3n = bigseg_3n_display(&highs, &lows, &pipeline, sm, tm, pm);
+            for x in big3n.iter() {
+                if x.is_buy == want_buy { values.push((x.bar_index, x.price as f32)); }
+            }
+        }
         _ => {}
     }
     write_output(out, dl, &values);
@@ -948,6 +999,14 @@ unsafe extern "C" fn buy_sell_markers_sup_fn(
                 if x.is_buy == want_buy {
                     values.push((x.bar_index, x.price as f32));
                 }
+            }
+        }
+        // 15/16: 高3+N买/卖 (统计命名, 一个 mode 输出该类全部 order>=1 点; N≤4 截断)
+        15 | 16 => {
+            let want_buy = m == 15;
+            let sup3n = superior_3n_display(&pipeline, &ssm, &stm, &spm);
+            for x in sup3n.iter() {
+                if x.is_buy == want_buy { values.push((x.bar_index, x.price as f32)); }
             }
         }
         _ => {}
