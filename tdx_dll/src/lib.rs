@@ -748,12 +748,16 @@ fn build_big_markers(
     // 二买+二卖合并 (detect_second_buy_markers 只产二买 is_buy=true, 二卖在独立 sell 函数)
     let mut sm = chanlun_lean_lib::detect_second_buy_markers(strokes, segs, bigs, sups);
     sm.extend(chanlun_lean_lib::detect_second_sell_markers(strokes, segs, bigs, sups));
+    // 三买/三卖基准集 (供 2+N 阻断终止判据使用)
     let tm = chanlun_lean_lib::zhongshu::detect_bigseg_third_marks(sups, bigs, segs, strokes, &zs, highs, lows);
+    let tm_buy_bars: Vec<usize> = tm.iter().filter(|m| m.is_buy).map(|m| m.bar_index).collect();
+    let tm_sell_bars: Vec<usize> = tm.iter().filter(|m| !m.is_buy).map(|m| m.bar_index).collect();
     // 大段 2+N买/卖 (C>F 结构判定, 不依赖轨道参数 — 参数仅为签名兼容保留)
+    // 2+N 序列终止约束: 其后第一个同向大段终点若已是三买/三卖 ⇒ 序列即刻终止
     let (blc1, db) = guidao::calc_bigseg_lower_band_case1(bigs, segs, strokes);
     let (buc1, ub) = guidao::calc_bigseg_upper_band_case1(bigs, segs, strokes);
-    let mut pm = guidao::detect_bigseg_cf_buy_markers(sups, bigs, segs, strokes, &blc1, &db, &ub);
-    pm.extend(guidao::detect_bigseg_cf_sell_markers(sups, bigs, segs, strokes, &buc1, &ub, &db));
+    let mut pm = guidao::detect_bigseg_cf_buy_markers_stop(sups, bigs, segs, strokes, &blc1, &db, &ub, &tm_buy_bars);
+    pm.extend(guidao::detect_bigseg_cf_sell_markers_stop(sups, bigs, segs, strokes, &buc1, &ub, &db, &tm_sell_bars));
     // 宿主撤回过滤: 撤回后标记 = 输出标记
     let rf = guidao::apply_sup_retreat_filter(sups, bigs, segs, strokes, sm, tm, pm, vec![]);
     // 大一买/大一卖 (独立检测, 不套用撤回过滤; 层参数与管线同源)
@@ -782,10 +786,14 @@ fn build_superior_markers(
 ) {
     let mut ssm = chanlun_lean_lib::detect_superior_second_buy_markers(strokes, segs, bigs, sups);
     ssm.extend(chanlun_lean_lib::detect_superior_second_sell_markers(strokes, segs, bigs, sups));
-    let mut spm = chanlun_lean_lib::detect_superior_cf_buy_markers(strokes, segs, bigs, sups);
-    spm.extend(chanlun_lean_lib::detect_superior_cf_sell_markers(strokes, segs, bigs, sups));
+    // 三买/三卖基准集 (供 2+N 阻断终止判据使用; 提前算, 高三买/高3卖显示与阻断集同源)
     let szs = chanlun_lean_lib::zhongshu::detect_superior_zhongshus(strokes, segs, bigs, sups);
     let stm = chanlun_lean_lib::zhongshu::detect_superior_third_marks(sups, bigs, segs, strokes, &szs, highs, lows);
+    let stm_buy_bars: Vec<usize> = stm.iter().filter(|m| m.is_buy).map(|m| m.bar_index).collect();
+    let stm_sell_bars: Vec<usize> = stm.iter().filter(|m| !m.is_buy).map(|m| m.bar_index).collect();
+    // 高2+N买/卖: 2+N 序列终止约束 — 其后第一个同向高级段终点若已是高三买/高三卖 ⇒ 序列即刻终止
+    let mut spm = chanlun_lean_lib::detect_superior_cf_buy_markers_stop(strokes, segs, bigs, sups, &stm_buy_bars);
+    spm.extend(chanlun_lean_lib::detect_superior_cf_sell_markers_stop(strokes, segs, bigs, sups, &stm_sell_bars));
     let sup_ret = chanlun_lean_lib::zhongshu::apply_sup2_retreat_filter(sups, bigs, segs, strokes, ssm, stm, spm);
     (sup_ret.superior_second_markers, sup_ret.superior_third_markers, sup_ret.superior_plus_markers)
 }
