@@ -370,7 +370,7 @@ unsafe extern "C" fn stroke_band_fn(
             if prev.is_top && !curr.is_top { strokes.push((prev.price, curr.price, curr.bar_index)); }
         }
     }
-    // Case1: triple divergence
+    // Case1: 三段结构比较 (第3段与第1段同向比较, 第2段同向确认)
     let mut bp: Vec<(usize, f64)> = Vec::new();
     if strokes.len() >= 3 {
         for i in 2..strokes.len() {

@@ -2357,8 +2357,8 @@ pub fn detect_seg_second_buy_markers(
         // 宿主 case2 确认门 : 宿主大段 case2 不成立即否决, 不向左退
         if !host_case2_ok(&seg_proj, big_start) { continue; }
 
-        // 锚点解析 A/C/D (B = 向下大段终点低点; seg_end 是线段索引) —— 与 共振a+ 共用同一真源
-        // (共振a+ 多头改调本函数, 线二买侧逻辑不变)
+        // 锚点解析 A/C/D (B = 向下大段终点低点; seg_end 是线段索引) —— 线段级二买/二卖锚点单一真源
+        // (多头侧调用方改调本函数, 线二买侧逻辑不变)
         let Some(an) = seg2_anchor_up(segments, strokes, seg_end) else { continue; };
 
         // C 回补门: (C − B) ≥ (A − B) × 0.75 (含 A > B 前提)
@@ -2402,7 +2402,7 @@ pub fn detect_seg_second_sell_markers(
         if !host_case2_ok(&seg_proj, big_start) { continue; }
 
         // 锚点解析 A/C/D (B = 向上大段终点高点; seg_end 是线段索引) —— 空头镜像同一真源
-        // (共振a+ 空头改调本函数, 线二卖侧逻辑不变)
+        // (空头侧调用方改调本函数, 线二卖侧逻辑不变)
         let Some(an) = seg2_anchor_down(segments, strokes, seg_end) else { continue; };
 
         // C 回补门 (空头镜像): (B − C) ≥ (B − A) × 0.75 (含 B > A 前提)

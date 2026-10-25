@@ -300,7 +300,7 @@ fn ensure_markers_computed() {
     }
     // 大一买/大一卖 (独立检测不套撤回)
     for m in &fm { out.push((m.bar_index, if m.is_buy { 6 } else { 7 }, m.price, 0)); }
-    // 大3+N买/卖: kind 8/9 + order=N, N<=4 截断 (3+5 起仅参与共振检测不出文字)
+    // 大3+N买/卖: kind 8/9 + order=N, N<=4 截断 (3+5 起不输出文字标记)
     // 3N 检测 → 只留 order>=1 (order0 基准已在三买卖) → 3N 专用撤回 (撤回池 = 撤回后三族)
     let big_3n = chanlun_lean_lib::zhongshu::bigseg_3n_marks_all_zhongshu(
         &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
@@ -348,7 +348,7 @@ fn ensure_superior_markers_computed() {
         &pipeline.strokes, &pipeline.segments, &pipeline.big_segments, &pipeline.superior_segments, lvl,
     ));
     for m in fms { out.push((m.bar_index, if m.is_buy { 6 } else { 7 }, m.price, 0)); }
-    // 高3+N买/卖: kind 8/9 + order=N, N<=4 截断同高2+N (3+5 起仅参与共振检测不出文字)
+    // 高3+N买/卖: kind 8/9 + order=N, N<=4 截断同高2+N (3+5 起不输出文字标记)
     // 3N 检测 → 只留 order>=1 (order0 转正基准已在 stm) → 3N 专用撤回 (撤回池 = 撤回后三族)
     let sup3n = chanlun_lean_lib::zhongshu::superior_3n_marks_all_zhongshu(
         &pipeline.superior_segments, &pipeline.big_segments, &pipeline.segments,
