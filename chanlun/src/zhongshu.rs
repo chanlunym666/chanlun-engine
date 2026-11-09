@@ -215,10 +215,10 @@ pub fn detect_bigseg_third_marks(
  // 买链 (离开=UP) 界 = 其后第一个**向下**高级段终点 bar；卖链镜像 = 第一个**向上**高级段终点。
  // 过渡窗口 (中枢终点 → 反向高级段成立点) 内照常判定 ( 过渡期放行不变);
  // 反向高级段成立 ⇒ 旧中枢领地终结, 其后归新结构（新结构自己有没有中枢由自己的中枢决定）。
- // 案例: 欧美1m 10/16 08:18 大三买 — bz#60 的 (离开,回试) 对落在 sup#57 之后,
+ // 情形: 大三买 — bz#60 的 (离开,回试) 对落在 sup#57 之后,
  // 而 sup#56 DOWN 10/14 23:08 成立即应截断 (宿主 sup#55 / 中枢 bz#60, sup#57 内无中枢)。
  // ⚠️ 本守卫 ≠ 「宿主段终点截断」(后者 已否决, 勿混淆)。
- // 镜像自 3+N 延伸同款守卫。
+ // 镜像自 3+N 序列延伸同款守卫。
  let zhongshu_sup2_dir = sup_up;
  let seq_end_bar = superior_segments
  .iter()
@@ -247,7 +247,7 @@ pub fn detect_bigseg_third_marks(
  log::debug!("[3rd] 回试终点bar={} ≥ 下一条中枢成型点 {} ⇒ 越界, 停", r1.end_bar, next_zs_start);
  break;
  }
- // 🔴 过渡期截断守卫 (基准大三买/卖, 与 3+N 延伸守卫同规): 回试终点越过
+ // 🔴 过渡期截断守卫 (基准大三买/卖, 与 3+N 序列延伸守卫同规): 回试终点越过
  // 「反向高级段成立点」⇒ 序列终结 (见上方注释; 过渡窗口内照常判定)
  if let Some(seq_end) = seq_end_bar {
  if r1.end_bar >= seq_end {
@@ -581,7 +581,7 @@ pub fn detect_superior_third_marks(
  // ⚠️ （过渡期阶段规则）: **不再截断到所属高级段末端** ——
  // 中枢之后（含过渡期阶段）的所有 (离开段, 回试段) 对**都参与判定**，命中即停
  //。旧实现 `pair_end = sup_end`（仅宿主范围内）
- // + 离开段方向不匹配即退，会把过渡期阶段的买卖点整段漏掉 —— 实例: XTIUSD M1
+ // + 离开段方向不匹配即退，会把过渡期阶段的买卖点整段漏掉 —— 实测可见
  // 09-29 13:35（sup[47] 向上段终点，highs=97.43 < 中枢 ZD=99.39）应有高级三卖而无标记。
  while k + 1 < sups.len() {
  let Some(r1) = resolve_sup_range(sups[k + 1], bigs, segs, strokes) else {
@@ -635,7 +635,7 @@ pub fn detect_superior_third_marks(
 
  // ── 新增: 初始数据特定情况 () ──
  // 与高2+N 补充同条件: 初始数据没有向下高高级段、却有向上高高级段
- // (sup2s 首段为 UP 且其起点 > 0, 开头存在游离向下高级段如美日 sup[0])
+ // (sup2s 首段为 UP 且其起点 > 0, 开头存在游离向下高级段如首段 sup[0])
  // → 游离向下高级段作为补充锚点: C = 锚点后首个向上高级段终点 (前高点);
  // 锚点后第一个"回试低点 > C"的向下高级段 (回试低点没与前高点重叠, K线最低价判定)
  // → 高三买 @其终点 (与现有中枢路径判定语义一致: 回试不破前高)
@@ -1726,7 +1726,7 @@ pub fn detect_bigseg_zhongshus_by_overlap(
 }
 
 
-// ═══ 以下为生产入口 + 3+N 延伸家族 (与最新版算法库同源同步) ═══
+// ═══ 以下为生产入口 + 3+N 序列延伸家族 (与最新版算法库同源同步) ═══
 
 /// 高级段三买/三卖中枢集口径开关 (单点可控): true = 每高高级段全部中枢, false = 只第一个中枢
 pub const SUPERIOR_THIRD_ALL_ZHONGSHU: bool = true;
@@ -1734,7 +1734,7 @@ pub const SUPERIOR_THIRD_ALL_ZHONGSHU: bool = true;
 /// 大段三买/三卖中枢集口径开关 (单点可控)
 pub const BIGSEG_THIRD_ALL_ZHONGSHU: bool = true;
 
-/// 3+N 延伸标记 (大段级与高级段级共用)
+/// 3+N 序列延伸标记 (大段级与高级段级共用)
 /// `order`: 0 = 基准大三买/大三卖 (等同 third marks), 1 = 3+1, 2 = 3+2 ...
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BigSeg3NMarker {
@@ -1744,7 +1744,7 @@ pub struct BigSeg3NMarker {
  pub price: f64,
  /// true = 3+N买 (回试不破 ZG), false = 3+N卖 (回试不破 ZD)
  pub is_buy: bool,
- /// 延伸序号: 0 = 基准, 1 = 3+1, 2 = 3+2 ...
+ /// 序列延伸序号: 0 = 基准, 1 = 3+1, 2 = 3+2 ...
  pub order: u32,
 }
 
@@ -1833,7 +1833,7 @@ pub fn detect_superior_zhongshus_by_overlap(
  out
 }
 
-/// 高级段中枢集口径（单点可控）——供高三买/高3卖 与其 3+N 延伸**共用同一集合**。
+/// 高级段中枢集口径（单点可控）——供高三买/高3卖 与其 3+N 序列延伸**共用同一集合**。
 pub fn superior_zhongshu_set(
  sups: &[(usize, usize, bool)],
  bigs: &[(usize, usize, bool)],
@@ -1893,11 +1893,11 @@ pub fn bigseg_third_marks_all_zhongshu(
  )
 }
 
-/// 大段 **3+N买/3+N卖**: 三买的延伸扩展。
+/// 大段 **3+N买/3+N卖**: 三买的序列延伸扩展。
 ///
 /// 🔴 **架构保证（不变式的来源）**：`order == 0`（大三买/大三卖**基准**）直接**播种**自
-/// [`detect_bigseg_third_marks`]，本函数只**追加** `order >= 1` 的延伸项（大3+1 / 大3+2 …）。
-/// ⇒ 「`order == 0` ≡ 现行大三买/大三卖」是**结构性**成立，与任何延伸边界的选择无关；
+/// [`detect_bigseg_third_marks`]，本函数只**追加** `order >= 1` 的序列延伸项（大3+1 / 大3+2 …）。
+/// ⇒ 「`order == 0` ≡ 现行大三买/大三卖」是**结构性**成立，与任何序列延伸边界的选择无关；
 /// 初始数据补充分支的边界因此只影响**新增项**，不可能改写既有信号。
 /// 3+N 重复登记防护: 同 (bar, 方向) 只保留最小 order
 fn push_3n(out: &mut Vec<BigSeg3NMarker>, bar_index: usize, price: f64, is_buy: bool, order: u32) {
@@ -1945,7 +1945,7 @@ pub fn detect_bigseg_3n_markers(
  })
  .collect();
 
- // ② 延伸扩展 —— 🔴 **口径 A**：
+ // ② 序列延伸扩展 —— 🔴 **口径 A**：
  // **一个宿主高级段 = 一条 3+N 序列**（与 `detect_bigseg_cf_*`(2+N)「一个锚点一条序列」同构）。
  //
  // ⚠️ 实现要点（吃过亏，勿回退）：**段内必须先按 bar 全局归并、再统一编号**。
@@ -1956,7 +1956,7 @@ pub fn detect_bigseg_3n_markers(
  // 规则原文：
  // > 「只要满足大三卖之后，只要涉及到该三卖的中枢延伸的大段卖点，都要依次以『大3+N卖』标记，
  // > **不能跳过、不能省略**」
- // ⇒ 延伸项**不再**用中枢 ZG/ZD 过滤（2+N 的上界是「锚点价」，本就与中枢无关）；
+ // ⇒ 序列延伸项**不再**用中枢 ZG/ZD 过滤（2+N 的上界是「锚点价」，本就与中枢无关）；
  // 基准（order 0，= 现行大三买/大三卖）仍由 `detect_bigseg_third_marks` 播种，一行未动。
  //
  // 基准（order 0）= 播种集原样不动；段内**其余**扫描到的回试段按 bar 顺序编 1,2,3…
@@ -1983,11 +1983,11 @@ pub fn detect_bigseg_3n_markers(
  .unwrap_or(usize::MAX);
  // ［规则］
  // 「只要向下的高级段成立，买点必须回撤到向上的高级段内」⇒
- // 宿主中枢之后**第一个与宿主段反向的高级段成立点** = 本中枢 3+N 延伸的**硬上界**：
+ // 宿主中枢之后**第一个与宿主段反向的高级段成立点** = 本中枢 3+N 序列延伸的**硬上界**：
  // 买链 (离开=UP) 界 = 其后第一个**向下**高级段终点 bar；卖链镜像 = 第一个**向上**高级段终点。
  // 回试段终点越过它 ⇒ break (序列终结, 其后归新结构)。
- // ⚠️ 与撤回过滤的事件时序 (cut=触发段终点, 只删已存在标记) 互补: 本守卫管住**延伸扫描本身**,
- // 撤回管不住「扫描在后、成立在后」的漏网项 (某历史案例即此)。
+ // ⚠️ 与撤回过滤的事件时序 (cut=触发段终点, 只删已存在标记) 互补: 本守卫管住**序列延伸扫描本身**,
+ // 撤回管不住「扫描在后、成立在后」的漏网项 (某情形即此)。
  let zhongshu_sup2_dir = sup_up;
  let seq_end_bar = superior_segments
  .iter()
@@ -2043,11 +2043,11 @@ pub fn detect_bigseg_3n_markers(
  }
  }
  }
- // ［规则］3+N 是「三买/三卖的延伸扩展」，
- // **无基准 ⇒ 无延伸**。段内按 bar 序遍历: 遇到基准 (order 0, 播种自
+ // ［规则］3+N 是「三买/三卖的序列延伸扩展」，
+ // **无基准 ⇒ 无序列延伸**。段内按 bar 序遍历: 遇到基准 (order 0, 播种自
  // detect_bigseg_third_marks) 才锚定序列; 锚定前的项 (回试价未达 ZG/ZD 的未命中对)
  // **丢弃不占号**; 本段无基准 ⇒ 整段不产任何 3+N 项。
- // 案例: 某历史案例 — 基准大三卖未命中 (回试高点超 ZD
+ // 情形: 某情形 — 基准大三卖未命中 (回试高点超 ZD
  // 0.82782), 旧逻辑却从 3+1 起编 ⇒ 无锚序列 (BUG 根因)。
  // 锚后口径不变: 基准之后每项依次 3+1/3+2… (不能跳过不能省略, 定版)。
  let mut order: u32 = 1;
@@ -2066,7 +2066,7 @@ pub fn detect_bigseg_3n_markers(
  order += 1;
  }
  }
- // ── 初始数据特定情况 (与 detect_bigseg_third_marks 同条件; 延伸项同款扩展) ──
+ // ── 初始数据特定情况 (与 detect_bigseg_third_marks 同条件; 序列延伸项同款扩展) ──
  // 变体1: sups 首段 UP 且起点 > 0 → 开头游离向下大段作补充锚点 (C = 后首个向上大段高点)
  if let Some(&(first_start, _, true)) = superior_segments.first() {
  if first_start > 0 {
@@ -2082,7 +2082,7 @@ pub fn detect_bigseg_3n_markers(
  .filter(|(_, s)| s.2)
  .filter_map(|(i, _)| crate::resolve_sup_end_point(i, big_segments, segments, strokes))
  .collect();
- // 延伸上界 = 第一个同向(向下)高级段终点 (与 2+N 变体1 的 first_down_sup_end 逐条同义)
+ // 序列延伸上界 = 第一个同向(向下)高级段终点 (与 2+N 变体1 的 first_down_sup_end 逐条同义)
  let first_down_sup_end = superior_segments
  .iter()
  .find(|s| !s.2)
@@ -2120,7 +2120,7 @@ pub fn detect_bigseg_3n_markers(
  .filter(|(_, s)| s.2)
  .filter_map(|(i, _)| crate::resolve_sup_end_point(i, big_segments, segments, strokes))
  .collect();
- // 延伸上界 = 第一个同向(向上)高级段终点 (卖镜像)
+ // 序列延伸上界 = 第一个同向(向上)高级段终点 (卖镜像)
  let first_up_sup_end = superior_segments
  .iter()
  .find(|s| s.2)
@@ -2186,7 +2186,7 @@ pub fn bigseg_3n_marks_all_zhongshu(
 ///
 /// 🔴 **口径 A（与大段级一致）**：**一个宿主高高级段 = 一条 3+N 序列**；
 /// 段内多条中枢**共户同一条序列**；段内先按 bar 全局归并去重再统一编号；
-/// 延伸项**不判价格**（「不能跳过、不能省略」）。
+/// 序列延伸项**不判价格**（「不能跳过、不能省略」）。
 /// 编号语义：`0` = 基准高三买/高三卖，`1` = 高3+1，`2` = 高3+2 …
 pub fn detect_superior_3n_markers(
  sups: &[(usize, usize, bool)],
@@ -2211,7 +2211,7 @@ pub fn detect_superior_3n_markers(
  })
  .collect();
 
- // ② 延伸扩展 —— 口径 A：一个宿主高高级段 = 一条序列
+ // ② 序列延伸扩展 —— 口径 A：一个宿主高高级段 = 一条序列
  let mut seg_bars: std::collections::HashMap<usize, Vec<(usize, bool, f64)>> =
  std::collections::HashMap::new();
  for zs in zhongshus {
@@ -2233,7 +2233,7 @@ pub fn detect_superior_3n_markers(
  .map(|z| z.start_bar)
  .min()
  .unwrap_or(usize::MAX);
- // 🔴 **（同向段未成立窗口买卖点截断, 高3+N 延伸窗口守卫, 与 高2+N 同规）**；
+ // 🔴 **（同向段未成立窗口买卖点截断, 高3+N 序列延伸窗口守卫, 与 高2+N 同规）**；
  // 🔴 ** 层级修正（定版「大三买只存在于自己的高级段中」定版链推及）**：
  // 离开/回试对 = 高级段 ⇒ 界 = **高一级（高高级段 sup2s）** — 与大段级 3+N（对=大段,
  // 界=高级段）逐条同构; 不得降级扫高级段（同级 ⇒ 回试段自身成立点=信号点, 误杀合法项,
@@ -2267,10 +2267,10 @@ pub fn detect_superior_3n_markers(
  }
  // 🔴 （3+N 显著特征，2+N 家族同源）：
  // 「无论 2+N 还是 3+N，其中有个显著特征：**自己本级段必然重叠**」——
- // 延伸项的**自身本级段**（回试段, k+1）必须与其**左侧紧邻的同向段**（k-1,
- // 前一个回试段）价格区间存在重叠；不重叠 ⇒ 该点**不是前基准的延伸项**，
+ // 序列延伸项的**自身本级段**（回试段, k+1）必须与其**左侧紧邻的同向段**（k-1,
+ // 前一个回试段）价格区间存在重叠；不重叠 ⇒ 该点**不是前基准的序列延伸项**，
  // 而是**新基准「高3卖/高3买」(order 0)**，序列从它重新起算。
- // 户户案例：2022-01-14 13:30 高3+1卖 (sup#15, 价[1.11864..1.14829])
+ // 情形：高3+1卖 (sup#15, 价[1.11864..1.14829])
  // < 其左侧紧邻向上高级段 sup#13 起点 (bar 27679)，零重叠 ⇒ 应为「高3卖」。
  // 左侧紧邻同向段 = k-1 (sups 方向交替 ⇒ k+1 的同向段在 k-1); k==0 无左邻 → 免判
  let overlap_ok = match (k > 0).then(|| k - 1).and_then(|pk| resolve_sup_range(sups[pk], bigs, segs, strokes)) {
@@ -2282,7 +2282,7 @@ pub fn detect_superior_3n_markers(
  }
  };
  if !overlap_ok {
- // 新基准 (order 0, 高3卖/高3买): 极性与延伸项一致 (向下离开→高3卖);
+ // 新基准 (order 0, 高3卖/高3买): 极性与序列延伸项一致 (向下离开→高3卖);
  // 去重后登记, 并在段内序列中以 order -1 占位 ⇒ 编号从它**重新起算**。
  if !out.iter().any(|m| m.bar_index == r1.3 && m.is_buy == is_up_leave && m.order == 0) {
  out.push(BigSeg3NMarker {

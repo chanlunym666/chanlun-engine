@@ -1337,19 +1337,19 @@ pub fn detect_bigseg_cf_buy_markers(
 /// ［阻断终止约束］大2+N买 的「大三买阻断」终止约束**（2+N 序列终止判据，与主体判定同构，只多一道闸）
 ///
 ///
-/// 语义：2+N 是「三底背离 F（=大二买）之后同向段终点的延伸」，一旦其后第一个向下大段
+/// 语义：2+N 是「三底比较 F（=大二买）之后同向段终点的序列延伸」，一旦其后第一个向下大段
 /// 的终点本身已成为**大三买**（= 中枢A 的延伸已终结、结构进入新中枢领地），
 /// 该 2+N 序列**即刻终止**，其后（含同向段未成立的过渡阶段）不再标记。
 ///
-/// 判据实现：对序列中每个已产出标记 `prev`（F 点 order=1 与各延伸项），
+/// 判据实现：对序列中每个已产出标记 `prev`（F 点 order=1 与各序列延伸项），
 /// 取 `nxt` = `prev` 之后第一个向下大段终点 bar；
 /// 若 `nxt ∈ third_buy_bars`（大三买基准 bar 集）⇒ 该序列在 `nxt` 处终止。
-/// 延伸循环内一旦 `xb >= 该终止 bar` 即 break。
+/// 序列延伸循环内一旦 `xb >= 该终止 bar` 即 break。
 ///
 /// ⚠️ 买侧；卖侧见对应镜像函数。`third_buy_bars` 传空切片 ⇒ **完全等于旧行为**
 /// （既有调用点与全部历史测试逐条不变）。
 /// ⚠️ `third_buy_bars` 应传**大三买基准集**（`detect_bigseg_third_marks` 的买侧输出，
-/// 即 `bigseg_third_marks_all_zhongshu` 中 `order == 0` 的项），**不含** 3+N 延伸项——
+/// 即 `bigseg_third_marks_all_zhongshu` 中 `order == 0` 的项），**不含** 3+N 序列延伸项——
 /// 基准集已 100% 覆盖全部 2+N∩3+N 冲突（10 数据集 / 90 万 bar 实测）。
 pub fn detect_bigseg_cf_buy_markers_stop(
  sups: &[(usize, usize, bool)],
@@ -1382,7 +1382,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
  // 锚点 = 向下高级段终点 (低点)
  let Some((dbe, d_price)) = resolve_sup_end_point(end_big, bigs, segs, strokes) else { continue; };
 
- // F = 锚点后首个三底背离组 (连续 3 个向下大段, 第3底>第1底 且 第2底>第1底) 的第三底
+ // F = 锚点后首个三底比较组 (连续 3 个向下大段, 第3底>第1底 且 第2底>第1底) 的第三底
  let mut f: Option<(usize, f64)> = None;
  for i in 2..down_bigs.len() {
  let (b0, l0) = down_bigs[i - 2];
@@ -1407,7 +1407,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
  let Some((_, c_price)) = up_bigs.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
  if c_price > f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
- // 2+N 延伸 (对齐高2+N): 参考高点 = min(U1, U2) 固定;
+ // 2+N 序列延伸 (对齐高2+N): 参考高点 = min(U1, U2) 固定;
  // 新向下高级段终点 bar 为界; 满足 min(U1,U2) > X > 锚点价 → 依次标记 2+2, 2+3, ...
  let second_up = up_bigs.iter().filter(|(b, _)| *b > dbe).nth(1);
  let ref_high = second_up.map(|(_, h)| c_price.min(*h));
@@ -1437,7 +1437,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
 
  // ── 新增: 初始数据特定情况·变体1（初始数据补充锚点） ──
  // 初始数据没有向下高级段、却有向上高级段 (sups 首段为 UP 且其起点 > 0, 开头存在游离向下大段)
- // → 游离向下大段作为补充锚点, 判定与现有完全一致 (三底背离 F / C > F / 2+N 延伸);
+ // → 游离向下大段作为补充锚点, 判定与现有完全一致 (三底比较 F / C > F / 2+N 序列延伸);
  // 守卫: 第三底须在第一个向下高级段终点之前 (与现有 next_down_sup 守卫同语义)
  if let Some(&(first_start, _, true)) = sups.first() {
  if first_start > 0 {
@@ -1446,7 +1446,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
  for k in 0..first_start {
  if bigs[k].2 { continue; } // 只处理向下大段 (补充锚点, 与现有 buy 循环同语义)
  let Some((dbe, d_price)) = resolve_sup_end_point(k, bigs, segs, strokes) else { continue; };
- // F = 锚点后首个三底背离组 (第三底)
+ // F = 锚点后首个三底比较组 (第三底)
  let mut f: Option<(usize, f64)> = None;
  for i in 2..down_bigs.len() {
  let (b0, l0) = down_bigs[i - 2];
@@ -1466,7 +1466,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
  let Some((_, c_price)) = up_bigs.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
  if c_price > f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
- // 2+N 延伸 (与现有一致): 参考高点 = min(U1, U2) 固定; 边界 = 第一个向下高级段终点
+ // 2+N 序列延伸 (与现有一致): 参考高点 = min(U1, U2) 固定; 边界 = 第一个向下高级段终点
  let second_up = up_bigs.iter().filter(|(b, _)| *b > dbe).nth(1);
  let ref_high = second_up.map(|(_, h)| c_price.min(*h));
  if let Some(rh) = ref_high {
@@ -1497,7 +1497,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
  // ── 新增: 初始数据特定情况·变体2（初始数据补充锚点） ──
  // 初始数据没有向下高级段、却有向上高级段 case2 (首段 UP 且从第一个大段开始, 无游离段):
  // 数据入口 = 向上高级段 case2 的起点 (低点);
- // 起点注入为三底背离组第一底 (锚点自身=第一底, 与现有 2+1 语义一致),
+ // 起点注入为三底比较组第一底 (锚点自身=第一底, 与现有 2+1 语义一致),
  // 其后向下大段终点与起点价比较 (第3底>起点 且 第2底>起点) → F; C>F → 2+1买;
  // 比较对象 = 组内第一底 (起点), 非相邻前底
  if let Some(&(first_start, _, true)) = sups.first() {
@@ -1508,7 +1508,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
  let mut bottoms: Vec<(usize, f64)> = Vec::with_capacity(down_bigs.len() + 1);
  bottoms.push((dbe, d_price));
  bottoms.extend(down_bigs.iter().filter(|(b, _)| *b > dbe).copied());
- // F = 首个三底背离组第三底 (第3底>第1底 且 第2底>第1底, 与现有判定逐条一致)
+ // F = 首个三底比较组第三底 (第3底>第1底 且 第2底>第1底, 与现有判定逐条一致)
  let mut f: Option<(usize, f64)> = None;
  for i in 2..bottoms.len() {
  let (b0, l0) = bottoms[i - 2];
@@ -1533,7 +1533,7 @@ pub fn detect_bigseg_cf_buy_markers_stop(
  if let Some((_, c_price)) = c {
  if c_price > f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
- // 2+N 延伸 (与现有一致): 参考高点 = min(U1, U2) 固定; 边界 = 第一个向下高级段终点
+ // 2+N 序列延伸 (与现有一致): 参考高点 = min(U1, U2) 固定; 边界 = 第一个向下高级段终点
  let second_up = up_bigs.iter().filter(|(b, _)| *b > dbe).nth(1);
  let ref_high = second_up.map(|(_, h)| c_price.min(*h));
  if let Some(rh) = ref_high {
@@ -1586,11 +1586,11 @@ pub fn detect_bigseg_cf_sell_markers(
 /// 定版规则：「『大二卖』或『大2+N卖』之后的第一个向上大段，若是大三卖，
 /// 则该 2+N 序列即刻终止（含同向段未成立的过渡阶段）」—— 与买侧对称。
 ///
-/// 语义：2+N卖 是「三顶背离 F（=大二卖）之后同向段终点的延伸」，一旦其后第一个**向上大段**
+/// 语义：2+N卖 是「三顶比较 F（=大二卖）之后同向段终点的序列延伸」，一旦其后第一个**向上大段**
 /// 的终点本身已成为**大三卖**（= 中枢A 延伸终结），该序列**即刻终止**，其后不再标记。
 ///
 /// ⚠️ `third_sell_bars` 传空切片 ⇒ **完全等于旧行为**；应传**大三卖基准集**
-/// （`detect_bigseg_third_marks` 的卖侧输出，不含 3+N 延伸项）。
+/// （`detect_bigseg_third_marks` 的卖侧输出，不含 3+N 序列延伸项）。
 pub fn detect_bigseg_cf_sell_markers_stop(
  sups: &[(usize, usize, bool)],
  bigs: &[(usize, usize, bool)],
@@ -1622,7 +1622,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
  // 锚点 = 向上高级段终点 (高点)
  let Some((ube, d_price)) = resolve_sup_end_point(end_big, bigs, segs, strokes) else { continue; };
 
- // F = 锚点后首个三顶背离组 (连续 3 个向上大段, 第3顶<第1顶 且 第2顶<第1顶) 的第三顶
+ // F = 锚点后首个三顶比较组 (连续 3 个向上大段, 第3顶<第1顶 且 第2顶<第1顶) 的第三顶
  let mut f: Option<(usize, f64)> = None;
  for i in 2..up_bigs.len() {
  let (b0, h0) = up_bigs[i - 2];
@@ -1646,7 +1646,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
  let Some((_, c_price)) = down_bigs.iter().find(|(b, _)| *b > ube).copied() else { continue; };
  if c_price < f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
- // 2+N 延伸 (镜像, 对齐高2+N卖): 参考低点 = max(C', C'+1) 固定;
+ // 2+N 序列延伸 (镜像, 对齐高2+N卖): 参考低点 = max(C', C'+1) 固定;
  // 新向上高级段终点 bar 为界; 满足 max(C',C'+1) < X < 锚点价 → 依次标记 2+2, 2+3, ...
  let second_down = down_bigs.iter().filter(|(b, _)| *b > ube).nth(1);
  let ref_low = second_down.map(|(_, l)| c_price.max(*l));
@@ -1675,7 +1675,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
 
  // ── 新增: 初始数据特定情况·变体1（初始数据补充锚点） ──
  // 初始数据没有向上高级段、却有向下高级段 (sups 首段为 DOWN 且其起点 > 0, 开头存在游离向上大段)
- // → 游离向上大段作为补充锚点, 判定与现有完全一致 (三顶背离 F / C'<F' / 2+N 延伸);
+ // → 游离向上大段作为补充锚点, 判定与现有完全一致 (三顶比较 F / C'<F' / 2+N 序列延伸);
  // 守卫: 第三顶须在第一个向上高级段终点之前 (与现有 next_up_sup 守卫同语义)
  if let Some(&(first_start, _, false)) = sups.first() {
  if first_start > 0 {
@@ -1684,7 +1684,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
  for k in 0..first_start {
  if !bigs[k].2 { continue; } // 只处理向上大段 (补充锚点)
  let Some((ube, d_price)) = resolve_sup_end_point(k, bigs, segs, strokes) else { continue; };
- // F = 锚点后首个三顶背离组 (第三顶)
+ // F = 锚点后首个三顶比较组 (第三顶)
  let mut f: Option<(usize, f64)> = None;
  for i in 2..up_bigs.len() {
  let (b0, h0) = up_bigs[i - 2];
@@ -1704,7 +1704,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
  let Some((_, c_price)) = down_bigs.iter().find(|(b, _)| *b > ube).copied() else { continue; };
  if c_price < f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
- // 2+N 延伸 (镜像, 与现有一致): 参考低点 = max(C', C'+1) 固定; 边界 = 第一个向上高级段终点
+ // 2+N 序列延伸 (镜像, 与现有一致): 参考低点 = max(C', C'+1) 固定; 边界 = 第一个向上高级段终点
  let second_down = down_bigs.iter().filter(|(b, _)| *b > ube).nth(1);
  let ref_low = second_down.map(|(_, l)| c_price.max(*l));
  if let Some(rl) = ref_low {
@@ -1734,7 +1734,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
 
  // ── 新增: 初始数据特定情况·变体2（初始数据补充锚点） ──
  // 初始数据没有向上高级段、却有向下高级段 case2 (首段 DOWN 且从第一个大段开始, 无游离段):
- // 数据入口 = 向下高级段 case2 的起点 (高点); 起点注入为三顶背离组第一顶 (锚点自身=第一顶),
+ // 数据入口 = 向下高级段 case2 的起点 (高点); 起点注入为三顶比较组第一顶 (锚点自身=第一顶),
  // 其后向上大段终点与起点价比较 (第3顶<起点 且 第2顶<起点) → F; C<F → 2+1卖;
  // 比较对象 = 组内第一顶 (起点), 非相邻前顶 (卖镜像, 与买侧同规则)
  if let Some(&(first_start, _, false)) = sups.first() {
@@ -1745,7 +1745,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
  let mut tops: Vec<(usize, f64)> = Vec::with_capacity(up_bigs.len() + 1);
  tops.push((ube, d_price));
  tops.extend(up_bigs.iter().filter(|(b, _)| *b > ube).copied());
- // F = 首个三顶背离组第三顶 (第3顶<第1顶 且 第2顶<第1顶, 与现有判定逐条一致)
+ // F = 首个三顶比较组第三顶 (第3顶<第1顶 且 第2顶<第1顶, 与现有判定逐条一致)
  let mut f: Option<(usize, f64)> = None;
  for i in 2..tops.len() {
  let (b0, h0) = tops[i - 2];
@@ -1770,7 +1770,7 @@ pub fn detect_bigseg_cf_sell_markers_stop(
  if let Some((_, c_price)) = c {
  if c_price < f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: false, order: 1 });
- // 2+N 延伸 (镜像, 与现有一致): 参考低点 = max(C', C'+1) 固定; 边界 = 第一个向上高级段终点
+ // 2+N 序列延伸 (镜像, 与现有一致): 参考低点 = max(C', C'+1) 固定; 边界 = 第一个向上高级段终点
  let second_down = down_bigs.iter().filter(|(b, _)| *b > ube).nth(1);
  let ref_low = second_down.map(|(_, l)| c_price.max(*l));
  if let Some(rl) = ref_low {
@@ -1898,7 +1898,7 @@ pub fn apply_sup_retreat_filter(
 // ═══ 线段级/笔级 2+N 买/卖 (宿主段 = 大段/线段, 部件 = 线段/笔) ═══
 // ===== 线段 2+N买/卖 + 线段买点撤回 () =====
 /// 线2+N买 (宿主 = 大段, 部件 = 线段; 与 `detect_bigseg_cf_buy_markers` **逐行同构**, 层级降一级):
-/// 锚点 = 向下大段终点; 其后首个三底背离组 (连续 3 个向下线段, 第3底>第1底 且 第2底>第1底) 的第三底 F,
+/// 锚点 = 向下大段终点; 其后首个三底比较组 (连续 3 个向下线段, 第3底>第1底 且 第2底>第1底) 的第三底 F,
 /// C = 锚点后首个向上线段终点 (需 > F) → 在 F 标记 线2+1买; 之后向下线段终点 X 满足
 /// min(U1,U2) > X > 锚点价且新向下大段未成立 → 线2+2, 线2+3, ...; 另含两处「初始数据特定情况」分支。
 ///
@@ -1923,7 +1923,7 @@ pub fn detect_seg_cf_buy_markers(
  // 锚点 = 向下大段终点 (低点)
  let Some((dbe, d_price)) = resolve_seg_end_point(end_seg, segments, strokes) else { continue; };
 
- // F = 锚点后首个三底背离组 (连续 3 个向下线段) 的第三底
+ // F = 锚点后首个三底比较组 (连续 3 个向下线段) 的第三底
  let mut f: Option<(usize, f64)> = None;
  for i in 2..down_segs.len() {
  let (b0, l0) = down_segs[i - 2];
@@ -1947,7 +1947,7 @@ pub fn detect_seg_cf_buy_markers(
  let Some((_, c_price)) = up_segs.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
  if c_price > f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
- // 2+N 延伸: 参考高点 = min(U1, U2) 固定; 新向下大段终点 bar 为界
+ // 2+N 序列延伸: 参考高点 = min(U1, U2) 固定; 新向下大段终点 bar 为界
  let second_up = up_segs.iter().filter(|(b, _)| *b > dbe).nth(1);
  let ref_high = second_up.map(|(_, h)| c_price.min(*h));
  if let Some(rh) = ref_high {
@@ -2061,7 +2061,7 @@ pub fn detect_seg_cf_buy_markers(
  markers
 }
 
-/// 线2+N卖 (**完全镜像**: 锚点 = 向上大段终点; F = 三顶背离第三顶; C'<F' → 线2+1卖;
+/// 线2+N卖 (**完全镜像**: 锚点 = 向上大段终点; F = 三顶比较第三顶; C'<F' → 线2+1卖;
 /// 之后向上线段终点 X 满足 max(C',C'+1) < X < 锚点价且新向上大段未成立 → 线2+2, 线2+3, ...)
 pub fn detect_seg_cf_sell_markers(
  big_segments: &[(usize, usize, bool)],
@@ -2080,7 +2080,7 @@ pub fn detect_seg_cf_sell_markers(
  if !is_up { continue; } // 只处理向上大段
  let Some((ube, d_price)) = resolve_seg_end_point(end_seg, segments, strokes) else { continue; };
 
- // F = 锚点后首个三顶背离组 (连续 3 个向上线段) 的第三顶
+ // F = 锚点后首个三顶比较组 (连续 3 个向上线段) 的第三顶
  let mut f: Option<(usize, f64)> = None;
  for i in 2..up_segs.len() {
  let (b0, h0) = up_segs[i - 2];
@@ -2217,7 +2217,7 @@ pub fn detect_seg_cf_sell_markers(
 
 // ===== 笔2+N买/卖 + 笔级撤回过滤 () =====
 /// 笔2+N买 (宿主 = 线段, 部件 = 笔; 与 `detect_seg_cf_buy_markers` **逐行同构**, 层级再降一级):
-/// 锚点 = 向下线段终点; 其后首个三底背离组 (连续 3 个向下笔, 第3底>第1底 且 第2底>第1底) 的第三底 F,
+/// 锚点 = 向下线段终点; 其后首个三底比较组 (连续 3 个向下笔, 第3底>第1底 且 第2底>第1底) 的第三底 F,
 /// C = 锚点后首个向上笔终点 (需 > F) → 在 F 标记 笔2+1买; 之后向下笔终点 X 满足
 /// min(U1,U2) > X > 锚点价且新向下线段未成立 → 笔2+2, 笔2+3, ...; 另含两处「初始数据特定情况」分支。
 ///
@@ -2238,7 +2238,7 @@ pub fn detect_stroke_cf_buy_markers(
  // 锚点 = 向下线段终点 (低点)
  let Some((dbe, d_price)) = crate::resolve_stroke_end_point(part_end, strokes) else { continue; };
 
- // F = 锚点后首个三底背离组 (连续 3 个向下笔) 的第三底
+ // F = 锚点后首个三底比较组 (连续 3 个向下笔) 的第三底
  let mut f: Option<(usize, f64)> = None;
  for i in 2..down_parts.len() {
  let (b0, l0) = down_parts[i - 2];
@@ -2262,7 +2262,7 @@ pub fn detect_stroke_cf_buy_markers(
  let Some((_, c_price)) = up_parts.iter().find(|(b, _)| *b > dbe).copied() else { continue; };
  if c_price > f_price {
  markers.push(SecondPlusOneMarker { bar_index: third_bar, price: f_price, is_buy: true, order: 1 });
- // 2+N 延伸: 参考高点 = min(U1, U2) 固定; 新向下线段终点 bar 为界
+ // 2+N 序列延伸: 参考高点 = min(U1, U2) 固定; 新向下线段终点 bar 为界
  let second_up = up_parts.iter().filter(|(b, _)| *b > dbe).nth(1);
  let ref_high = second_up.map(|(_, h)| c_price.min(*h));
  if let Some(rh) = ref_high {
@@ -2375,7 +2375,7 @@ pub fn detect_stroke_cf_buy_markers(
  markers
 }
 
-/// 笔2+N卖 (**完全镜像**: 锚点 = 向上线段终点; F = 三顶背离第三顶; C'<F' → 笔2+1卖;
+/// 笔2+N卖 (**完全镜像**: 锚点 = 向上线段终点; F = 三顶比较第三顶; C'<F' → 笔2+1卖;
 /// 之后向上笔终点 X 满足 max(C',C'+1) < X < 锚点价且新向上线段未成立 → 笔2+2, 笔2+3, ...)
 pub fn detect_stroke_cf_sell_markers(
  segments: &[(usize, usize, bool)],
@@ -2391,7 +2391,7 @@ pub fn detect_stroke_cf_sell_markers(
  if !is_up { continue; } // 只处理向上线段
  let Some((ube, d_price)) = crate::resolve_stroke_end_point(part_end, strokes) else { continue; };
 
- // F = 锚点后首个三顶背离组 (连续 3 个向上笔) 的第三顶
+ // F = 锚点后首个三顶比较组 (连续 3 个向上笔) 的第三顶
  let mut f: Option<(usize, f64)> = None;
  for i in 2..up_parts.len() {
  let (b0, h0) = up_parts[i - 2];
@@ -2533,7 +2533,7 @@ pub fn detect_stroke_cf_sell_markers(
 /// 🔴 ** 修正**：`x` = 前驱区间内**最后一个买点**，
 /// 必须把**3+N 自己的 bar 也算进候选池** —— 与「2+N买」同规（2+N 位于 `plus_markers`，
 /// 本来就在池内）。此前漏算 ⇒ 当 3+N 恰好是区间内最晚的买点时，`x` 偏小、3+N 反而被自己的
-/// 撤回规则删掉（欧美30m 2025-05-13 02:30 / 2025-06-19 14:30 两例即如此）。
+/// 撤回规则删掉（实测两例即如此）。
 /// ⚠️ 本函数只对 3+N 列表做 retain ⇒ **不会改变 二买/三买/2+N 既有信号**。
 ///
 /// ⚠️ 为什么单独一支而不改 `apply_sup_retreat_filter` 签名：后者有 ~110 个调用点，加参数会波及全仓。
