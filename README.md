@@ -1,8 +1,8 @@
-# 缠论指标引擎（Chanlun Engine）
+# Chanlun Engine（缠论指标引擎）
 
-> **English:** Chanlun Engine is a Rust implementation of Chan Theory technical analysis. It builds a five-level recursive structure — fractals, strokes, segments, major segments and superior segments — with three independent channel sets, major-segment centers and structure markers, and ships as ready-to-use DLL plugins for Tongdaxin (TDX, 64-bit) and MetaTrader 4 (32-bit). All computation runs locally without network access. MIT licensed.
+> **English:** Chanlun Engine is a Rust implementation of Chanlun (缠论) technical analysis. It builds a five-level recursive structure — fractals, strokes, segments, major segments and superior segments — with three independent channel sets, major-segment centers and structure markers, and ships as ready-to-use DLL plugins for Tongdaxin (TDX, 64-bit) and MetaTrader 4 (32-bit). All computation runs locally without network access. MIT licensed.
 
-**用 Rust 从零实现的缠论（Chan Theory）技术分析引擎**，提供**通达信（TDX）**与 **MT4** 双平台 DLL 插件，复制即用。五级递归结构 · 三级独立轨道 · 大段中枢 · 买卖点自动标注 · 全市场选股。
+**Chanlun Engine（缠论指标引擎）** 是用 **Rust 从零实现**的缠论技术分析引擎，提供**通达信（TDX）**与 **MT4** 双平台 DLL 插件，复制即用。五级递归结构 · 三级独立轨道 · 大段中枢 · 买卖点自动标注 · 全市场选股。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.99.1-dea584?logo=rust)](https://www.rust-lang.org/)
@@ -24,7 +24,7 @@
 
 ## 项目简介
 
-缠论指标引擎是一套用 Rust 从零实现的缠论（Chan Theory）技术分析引擎，将缠论的**五级递归结构**完整落地为可运行的指标，并打包为通达信（TDX）与 MT4 双平台的 DLL 插件，复制即用。
+Chanlun Engine（缠论指标引擎）是一套用 Rust 从零实现的缠论技术分析引擎，将缠论的**五级递归结构**完整落地为可运行的指标，并打包为通达信（TDX）与 MT4 双平台的 DLL 插件，复制即用。
 
 **核心能力：**
 
