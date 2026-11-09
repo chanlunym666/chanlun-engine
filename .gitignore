@@ -11,9 +11,5 @@ tools/
 __pycache__/
 *.pyc
 
-# 依赖本机数据的诊断测试与孤儿数据（不入库）
-chanlun/tests/probe_f1_m5_events.rs
-chanlun/tests/probe_stroke_case3_race.rs
-chanlun/tests/verify_300842.rs
-chanlun/tests/verify_precise.rs
-chanlun/tests/300842_5m.bin
+# 本机数据文件（如有测试需要，放在 chanlun/tests/data/ 下，不入库）
+chanlun/tests/data/

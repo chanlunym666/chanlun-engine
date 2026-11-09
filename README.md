@@ -210,7 +210,7 @@ cd mt4_dll;  cargo test
 
 | 模块 | 测试数 | 覆盖内容 |
 |------|--------|----------|
-| `chanlun/tests` | 12 | 结构输出对照回归 |
+| `chanlun/tests` | 2 | 结构输出对照回归 |
 | `tdx_dll/src` | 17 | FFI 层与函数表 |
 | `mt4_dll/src` + `tests` | 11 | FFI 层与跨层一致性 |
 
